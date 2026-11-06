@@ -3,7 +3,7 @@
 The detailed notes for each milestone, newest first. A version is listed as tested only after it has been tested in Logic on both
 test Macs (the M4 Mac mini and the Intel Mac) and worked as described. The README describes the current version.
 
-Version 0.2.0 (milestone 2, the empty build; built, **waiting for its test in Logic on both Macs**). The first code. The plugin loads
+Version 0.2.0 (milestone 2, the empty build; **tested in Logic on both Macs on 6 November 2026 and working as described**). The first code. The plugin loads
 and passes the audio through unchanged; there is no repeater yet.
 
 - **Plugin:** AU and VST3 audio effect called MimicPhon (Logic: Audio Units > particledots > MimicPhon). Bundle id
@@ -22,6 +22,7 @@ and passes the audio through unchanged; there is no repeater yet.
   `core/HostClock.h` (Logic's tempo clock, copied from PhenomeEon without its Morphagene-only tables) and `core/Gain.h` (level knob curve,
   decibels, soft limiter, copied from PhenomeEon without the Sound On Sound law and loop fades).
 - **Checked before hand-over:** on a Linux test computer, 128 engine checks and 91 plugin-side checks (see the README). On GitHub's Mac (run #1, both jobs green): 128 engine checks again, `auval` AU VALIDATION SUCCEEDED, `pluginval` passed at strictness level 5 for AU and VST3, package archs `x86_64 arm64`.
+- **Tested in Logic:** on the M4 Mac mini (macOS Tahoe, Logic 11.2.2) and the Intel Mac (macOS 12.7.8, Logic 10.7.8): loads under Audio Units > particledots > MimicPhon, audio unchanged, window opens and resizes with all 21 controls, Clear switches itself off, saved projects reopen with the same settings. All as described on both.
 - **Soft limiter note:** the copied soft limiter never goes above 1.0, but in single precision it reaches exactly 1.0 for very loud
   input (above about 2.6); its comment now says so (PhenomeEon's comment says it never reaches 1.0, which is true only on paper).
 
