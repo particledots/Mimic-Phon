@@ -3,6 +3,29 @@
 The detailed notes for each milestone, newest first. A version is listed as tested only after it has been tested in Logic on both
 test Macs (the M4 Mac mini and the Intel Mac) and worked as described. The README describes the current version.
 
+Version 0.3.0 (milestone 3, the styled panel; **not yet tested in Logic**). The window from the approved picture. Still no repeater.
+
+- **Styled panel** (`plugin/Source/StyledPanel.*`), after `MimicPhon_panel_mockup_1.png`: title and header, the Zone band (big coloured Zone window,
+  the staircase of the eight Zones with their ranges, the delay / tempo box with TICK and RATE lights), five knob cards (Input Level with
+  the -3 / 0 / +3 / +6 dB chips, Mix, Repeats, Halo, Output Level), five more (Zone with eight steps and the Zone's colour on its arc,
+  Color with the teal unity mark, Rate with the teal 1/1 mark, uRate, and the uRate LFO card with Rate, Depth, Sine / Triangle and Sync),
+  the button row (Hold, Flip, Skew, Ping Pong / Swap, Clear, Tempo Sync in teal) and the Clock Division menu. Every control is attached
+  to the same frozen id as in the plain window; **no id changed**.
+- **Switching:** PLAIN SLIDERS (styled panel, top right) and Styled panel (plain window, top right). The choice is stored in the saved project as a
+  property of the state (`editorView`), not as a control, so automation is unaffected; a project saved with 0.2.0 opens styled.
+- **Zone window:** the eight colours (0 green, 1 lime, 2 yellow, 3 orange, 4 red, 5 magenta, 6 lilac, 7 blue); flashes half a second dim / half a second
+  bright while Ping Pong / Swap is on. The Zone knob shows a coloured dot at Zone 0 so its colour is not lost.
+- **Read-outs are first guesses** until each control has its sound (dB, percentages, the Color words, uRate in semitones, LFO Rate in Hertz); the delay time
+  comes from the engine's new map. Skew does not split Left and Right yet (both show the same time until milestone 6).
+- **Engine (window only):** `core/ZoneMap.h` (free-running delay: logarithmic across each Zone's range, Rate left = shortest; Tempo Sync: the manual's 13 multiples and
+  divisions in 13 equal bands, 1/1 in the middle, Zone steps by powers of 2 from the Zone that fits the clock best), Logic's tempo and bar length kept for the window, and
+  two counters (clock ticks, delay-time repeats) behind the lights. `process()` still leaves the audio exactly as it was.
+- **Copied from PhenomeEon and renamed:** `PanelLookAndFeel` (without the tape-reel colours and the record dot), the five font files and their licence texts,
+  the knob card and chip selector, the window-switching pattern.
+- **Checked before hand-over (Linux test computer):** 159 engine checks (31 new) and 197 plugin-side checks (106 new), all passing; pictures drawn at 840, 1200 and 1800 pixels wide
+  and compared with the mockup. **GitHub's Mac build (run #4, commit a792619, both jobs green):** 159 engine checks, `auval` AU VALIDATION SUCCEEDED, `pluginval` passed at strictness level 5 for AU and VST3, package archs `x86_64 arm64`.
+- **Not tested in Logic yet.**
+
 Version 0.2.0 (milestone 2, the empty build; **tested in Logic on both Macs on 6 November 2026 and working as described**). The first code. The plugin loads
 and passes the audio through unchanged; there is no repeater yet.
 
