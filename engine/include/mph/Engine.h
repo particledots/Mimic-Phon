@@ -104,7 +104,7 @@ namespace mph
         float dcIn[2] = { 0.0f, 0.0f }, dcOut[2] = { 0.0f, 0.0f };      // the DC blocker in the feedback path (one per channel)
         float dcCoefficient = 0.9993f;
     float levelEnv[2] = { 0.0f, 0.0f }, levelGain[2] = { 1.0f, 1.0f };   // the leveller in the feedback path (one per channel)
-    float levelAttack = 0.02f, levelRelease = 0.0001f, envRelease = 0.9999f;
+    float levelRelease = 0.0001f, envRelease = 0.9999f;
         bool started = false;                              // false until the first block after prepare(): then everything snaps to its setting
         bool clearWasOn = false;
         int lastZone = -1;

@@ -108,7 +108,7 @@ is done by hand on the real Macs.
 
 ## What changed in 0.4.1
 
-- **Beyond infinite is tamed:** growth beyond 100 % is counted per second (not per echo) for delays under half a second, and a leveller in the feedback holds the loop at a steady clean level instead of clipping harder and harder. Loud material at exactly infinite now settles around 0.5.
+- **Beyond infinite is tamed:** growth beyond 100 % is counted per second (not per echo) for delays under half a second, and a leveller in the feedback holds the loop at a steady clean level instead of clipping harder and harder. Loud material at exactly infinite now settles around 0.4.
 - **Rate glide slowed** from about 80 ms to about 160 ms.
 - Engine self-test now 246 checks. No control id changed.
 

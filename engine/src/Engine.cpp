@@ -16,7 +16,6 @@ namespace
     constexpr double kZoneFadeSeconds = 0.020;         // Zone jump: crossfade between the old and the new read point
     constexpr double kDcBlockerHz = 5.0;
     constexpr float kLevellerCeiling = 0.6f;           // the feedback path is held at this level (clean, instead of distorting)
-    constexpr double kLevellerAttackSeconds = 0.002;   // how fast the leveller pulls the loop down when it gets too loud
     constexpr double kLevellerReleaseSeconds = 0.250;  // how slowly it lets go
     constexpr double kBeyondFullDelaySeconds = 0.5;    // "beyond infinite" grows per second, not per echo, below this delay time               // the feedback path lets nothing below this through (no DC build-up at infinite)
 
@@ -47,7 +46,6 @@ void Engine::prepare (double newSampleRate, int newMaxBlockSize, int newNumChann
     rampCoefficient = onePoleCoefficient (kLevelGlideSeconds, sampleRate);
     fadeStep = (float) (1.0 / std::max (16.0, kZoneFadeSeconds * sampleRate));
 
-    levelAttack = onePoleCoefficient (kLevellerAttackSeconds, sampleRate);
     levelRelease = onePoleCoefficient (kLevellerReleaseSeconds, sampleRate);
     envRelease = (float) std::exp (-1.0 / (kLevellerReleaseSeconds * sampleRate));
 
@@ -225,7 +223,10 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
             const float mag = std::fabs (fed);
             levelEnv[c] = std::max (mag, levelEnv[c] * envRelease);
             const float wanted = levelEnv[c] > kLevellerCeiling ? kLevellerCeiling / levelEnv[c] : 1.0f;
-            levelGain[c] += (wanted - levelGain[c]) * (wanted < levelGain[c] ? levelAttack : levelRelease);
+            if (wanted < levelGain[c])
+                levelGain[c] = wanted;                         // instant attack: no part of a loud echo's start slips past
+            else
+                levelGain[c] += (wanted - levelGain[c]) * levelRelease;
             fed *= levelGain[c];
             buffers[c].write (x + dsp::softLimit (fed));
 

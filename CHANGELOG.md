@@ -6,8 +6,9 @@ test Macs (the M4 Mac mini and the Intel Mac) and worked as described. The READM
 Version 0.4.1 (milestone 4, the core repeater; **the fixes for what 0.4.0 showed in Logic; not yet tested in Logic**).
 
 - **0.4.0 tested in Logic (6 November 2026) on both Macs:** one echo, Zone steps (no clicks heard), Clear and the tail all worked. Two things to fix: beyond infinite the repeats got louder and louder until they fed back harshly (worst in Zone 4 and shorter, still there with long echoes); the Rate glide was a little too responsive.
-- **Beyond infinite is now tamed:** the growth beyond 100 % is counted per second rather than per echo for delays under half a second (a 20 ms delay no longer grows 25 times faster than a 500 ms one), and a leveller in the feedback path (2 ms attack, 250 ms release, ceiling 0.6) holds the loop at a steady, clean level when it grows, instead of the soft limiter clipping it harder and harder. The soft limiter is kept only as a last safety. Side effect: loud material at exactly infinite now settles around 0.5 instead of just above 0.8.
-- **Rate glide slowed from about 80 ms to about 160 ms.**
+- **Beyond infinite is now tamed:** the growth beyond 100 % is counted per second rather than per echo for delays under half a second (a 20 ms delay no longer grows 25 times faster than a 500 ms one), and a leveller in the feedback path (instant attack, 250 ms release, ceiling 0.6) holds the loop at a steady, clean level when it grows, instead of the soft limiter clipping it harder and harder. The soft limiter is kept only as a last safety. Side effect: loud material at exactly infinite now settles around 0.4 instead of just above 0.8.
+- **Rate glide slowed from about 80 ms to about 160 ms** (Bryn: better).
+- **0.4.1 first build, tested in Logic:** the glide and the runaway were better, but a metronome-like tick at the start of each echo grew as the echoes multiplied. Cause: the leveller took 2 ms to pull the gain down, so the sharp start of every echo slipped past it and was clipped by the soft limiter. Fixed in the next build: the leveller now pulls down instantly (only its letting-go is slow), so nothing slips past.
 - Engine self-test: 246 checks (two new ones for beyond infinite at 20 ms: slow growth, then a steady level, no clipping).
 - No control id changed.
 
