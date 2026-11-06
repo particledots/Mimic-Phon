@@ -4,9 +4,10 @@
 // projects and automation work the same whichever window is showing. The panel only draws and edits control values; it
 // makes no sound. It does look at the engine, read-only, for Logic's tempo and for the two blinking lights.
 //
-// Until the milestone that makes a control work, its read-out is a first guess at what the position will mean (a percentage,
-// a decibel value, a delay time worked out by engine/include/mph/core/ZoneMap.h). These read-outs are tuned together with
-// the sound in the later milestones; the control ids never change.
+// The read-outs of the controls that make sound (milestone 4: Input and Output Level, Mix, Repeats, Zone, Rate) use the engine's own
+// functions (core/Gain.h, core/Repeats.h, core/ZoneMap.h), so the number shown is the number heard. For the controls that do not make
+// sound yet, the read-out is a first guess at what the position will mean (a percentage, semitones, Hertz); these are tuned together
+// with the sound in the later milestones. The control ids never change. Tempo Sync shows free-running times until milestone 8.
 //
 // The panel is laid out in a fixed 1200 x 800 space; the editor scales it to the window.
 // (The look-and-feel, fonts, KnobCard and the chip selector follow PhenomeEon's StyledPanel, copied and renamed.)
@@ -85,6 +86,7 @@ public:
 
     const char* getParameterId() const { return parameterId; }
     juce::Slider& getSlider() { return slider; }
+    juce::String getReadoutText() const { return format (slider.getValue()); }      // what the card shows under the dial
 
     static constexpr int kDialSize = 104;
     static constexpr int kDialCentreY = 101;

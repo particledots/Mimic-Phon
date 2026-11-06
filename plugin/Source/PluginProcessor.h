@@ -1,5 +1,5 @@
 // The plugin wrapper. It talks to Logic, reads the control values and passes them, with the audio and Logic's tempo,
-// to the engine. It contains no sound-making code.
+// to the engine. It contains no sound-making code. It tells Logic the tail length (how long the repeats keep sounding).
 //
 // One housekeeping job: a few times a second, on the window thread, it checks whether the engine has dealt with the
 // Clear button and, if so, switches the control off too, so the button always shows the truth. A project saved while
@@ -29,7 +29,8 @@ public:
     bool acceptsMidi() const override  { return false; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 0.0; }      // no repeats yet (milestone 4 sets the real tail)
+    // How long the repeats keep sounding with the current settings (about 60 dB of fall, capped at 120 s; infinite and beyond = the cap).
+    double getTailLengthSeconds() const override { return engine.getTailSeconds(); }
 
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }

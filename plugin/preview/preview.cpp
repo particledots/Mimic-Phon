@@ -8,8 +8,9 @@
 //      the saved project, and that a project saved before milestone 3 opens with the styled panel;
 //   4. checks what the styled panel shows: the Zone window colour, the delay read-out, the tempo read-out, the Rate knob's
 //      read-out with Tempo Sync, the flashing Zone window with Ping Pong, and the two blinking lights;
-//   5. drives the real processor with audio the way Logic does and checks the audio comes out unchanged, bit for bit
-//      (mono and stereo, several block sizes), with every control moved;
+//   5. drives the real processor with audio the way Logic does: with Mix fully left the live signal comes out unchanged, bit for bit
+//      (mono and stereo, several block sizes); with Mix fully right the echo lands at the delay time the window shows, in every
+//      Zone; the repeats stay sane with every control at an extreme; Clear silences the repeats; the host is told the tail;
 //   6. checks saving and reloading, the Clear button switching itself off, and opening and closing the window while audio runs.
 //
 // Usage: MimicPhonPreview <folder for the pictures>
@@ -126,7 +127,18 @@ namespace
             original.makeCopyOf (buffer);
             proc.processBlock (buffer, midi);
             for (int c = 0; c < channels; ++c)
-                same = same && std::memcmp (buffer.getReadPointer (c), original.getReadPointer (c), sizeof (float) * (size_t) blockSize) == 0;
+            {
+                const bool equal = std::memcmp (buffer.getReadPointer (c), original.getReadPointer (c), sizeof (float) * (size_t) blockSize) == 0;
+                if (! equal && same)
+                {
+                    int first = 0;
+                    while (first < blockSize && buffer.getSample (c, first) == original.getSample (c, first))
+                        ++first;
+                    std::cout << "  (first difference: block " << b << ", channel " << c << ", sample " << first << ": in "
+                              << original.getSample (c, first) << " out " << buffer.getSample (c, first) << ")" << std::endl;
+                }
+                same = same && equal;
+            }
         }
         return same;
     }
@@ -402,20 +414,40 @@ int main (int argc, char** argv)
             setParameter (p, MphParams::zone, 1.0f);                       // the top of the Zone menu = Zone 7
             expect (panel->getReadout().delayLeft == "41.8 s", "Zone 7, Rate fully right: 41.8 s (the longest delay time)");
 
-            // Tempo Sync: the Rate knob names the step and the clock; the tempo from Logic is shown
+            // Tempo Sync is built in milestone 8: until then the button changes neither the sound nor the read-outs
             resetAll (p);
             setParameter (p, MphParams::tempoSync, 1.0f);
             panel->refreshNow();
             r = panel->getReadout();
-            expect (r.synced && r.rateText == "1/1 (tempo 1/4)", "Tempo Sync: the Rate knob in the middle reads \"1/1 (tempo 1/4)\"");
-            expect (r.delayLeft == "500 ms", "Tempo Sync at 120 BPM, 1/4 clock, Zone 4, 1/1: 500 ms");
-            setParameter (p, MphParams::rate, 0.0f);
-            expect (panel->getReadout().rateText == "x2 (tempo 1/4)", "Tempo Sync: Rate fully left reads x2");
+            expect (! r.synced && r.rateText == "653 ms", "Tempo Sync on (not working yet): the Rate knob still reads the free-running 653 ms");
+            expect (r.delayLeft == "653 ms", "Tempo Sync on (not working yet): the delay read-out is still the free-running time");
             setParameter (p, MphParams::rate, 1.0f);
-            expect (panel->getReadout().rateText == "/2 (tempo 1/4)", "Tempo Sync: Rate fully right reads /2");
-            setParameter (p, MphParams::clockDivision, 1.0f / 9.0f);        // index 1 = "1 bar"
-            setParameter (p, MphParams::rate, 0.5f);
-            expect (panel->getReadout().rateText == "1/1 (tempo 1 bar)", "Tempo Sync: the Clock Division menu is named in the read-out");
+            expect (panel->getReadout().rateText == "1.31 s", "Rate fully right in Zone 4 reads 1.31 s with Tempo Sync on (not working yet)");
+
+            // The read-outs of the controls that make sound say what is heard
+            resetAll (p);
+            std::vector<KnobCard*> knobCards;
+            collect (*panel, knobCards);
+            auto cardText = [&] (const char* id) -> juce::String
+            {
+                for (auto* card : knobCards)
+                    if (juce::String (card->getParameterId()) == id)
+                        return card->getReadoutText();
+                return "(no such card)";
+            };
+            expect (cardText (MphParams::inputLevel) == "0.0 dB" && cardText (MphParams::outputLevel) == "0.0 dB", "defaults: Input Level and Output Level read 0.0 dB");
+            expect (cardText (MphParams::mix) == "50 % wet", "defaults: Mix reads 50 % wet");
+            expect (cardText (MphParams::repeats) == "x 0.35", "defaults: Repeats reads x 0.35 (what is fed back each time round)");
+            setParameter (p, MphParams::repeats, 0.0f);
+            expect (cardText (MphParams::repeats) == "one echo", "Repeats fully left reads \"one echo\"");
+            setParameter (p, MphParams::repeats, 0.83f);
+            expect (cardText (MphParams::repeats) == "infinite", "Repeats at 0.83 reads \"infinite\"");
+            setParameter (p, MphParams::repeats, 1.0f);
+            expect (cardText (MphParams::repeats) == "inf +12 %", "Repeats fully right reads \"inf +12 %\" (beyond infinite)");
+            setParameter (p, MphParams::inputLevel, 1.0f);
+            setParameter (p, MphParams::outputLevel, 0.0f);
+            expect (cardText (MphParams::inputLevel) == "+6.0 dB" && cardText (MphParams::outputLevel) == "off", "Input Level at the top reads +6.0 dB; Output Level at 0 reads off");
+            resetAll (p);
 
             // Ping Pong makes the Zone window flash (half a second dim, half a second bright); without it, always bright
             resetAll (p);
@@ -523,33 +555,189 @@ int main (int argc, char** argv)
 
     // ---------------- audio through the real processor ----------------
     {
+        // Sets every control to a value, then puts the three that decide the live signal's level back (Input Level, Input Gain, Output
+        // Level) and Mix fully left, so what comes out can be compared with what went in, bit for bit.
+        auto everythingTo = [&] (MimicPhonProcessor& target, float value)
+        {
+            for (auto* param : target.getParameters())
+                param->setValueNotifyingHost (value);
+            for (const char* id : { MphParams::inputLevel, MphParams::inputGain, MphParams::outputLevel })
+                if (auto* param = target.getValueTreeState().getParameter (id))
+                    param->setValueNotifyingHost (param->getDefaultValue());
+            setParameter (target, MphParams::mix, 0.0f);
+        };
+
         resetAll (proc);
+        setParameter (proc, MphParams::mix, 0.0f);
         const int blockSizes[] = { 1, 7, 32, 64, 100, 512, 1024, 4096 };
 
         for (int block : blockSizes)
-            expect (passesThroughUnchanged (proc, 2, block, 20), "stereo: audio unchanged, defaults, block " + juce::String (block));
+            expect (passesThroughUnchanged (proc, 2, block, 20), "stereo: Mix fully left, audio unchanged, defaults, block " + juce::String (block));
 
-        // Every control moved to an extreme: the audio must still come out exactly as it went in.
-        for (auto* param : proc.getParameters())
-            param->setValueNotifyingHost (1.0f);
+        // Every other control moved to an extreme: the live signal must still come out exactly as it went in.
+        everythingTo (proc, 1.0f);
         for (int block : blockSizes)
-            expect (passesThroughUnchanged (proc, 2, block, 20), "stereo: audio unchanged, every control at maximum, block " + juce::String (block));
-        for (auto* param : proc.getParameters())
-            param->setValueNotifyingHost (0.0f);
+            expect (passesThroughUnchanged (proc, 2, block, 20), "stereo: Mix fully left, audio unchanged, every other control at maximum, block " + juce::String (block));
+        everythingTo (proc, 0.0f);
         for (int block : blockSizes)
-            expect (passesThroughUnchanged (proc, 2, block, 20), "stereo: audio unchanged, every control at minimum, block " + juce::String (block));
+            expect (passesThroughUnchanged (proc, 2, block, 20), "stereo: Mix fully left, audio unchanged, every other control at minimum, block " + juce::String (block));
         resetAll (proc);
 
         // Mono, and other sample rates
         MimicPhonProcessor mono;
         mono.setPlayConfigDetails (1, 1, 44100.0, 256);
         mono.prepareToPlay (44100.0, 256);
-        expect (passesThroughUnchanged (mono, 1, 256, 40), "mono at 44.1 kHz: audio unchanged");
+        setParameter (mono, MphParams::mix, 0.0f);
+        expect (passesThroughUnchanged (mono, 1, 256, 40), "mono at 44.1 kHz: Mix fully left, audio unchanged");
 
         MimicPhonProcessor wide;
         wide.setPlayConfigDetails (2, 2, 88200.0, 1024);
         wide.prepareToPlay (88200.0, 1024);
-        expect (passesThroughUnchanged (wide, 2, 1024, 40), "stereo at 88.2 kHz: audio unchanged");
+        setParameter (wide, MphParams::mix, 0.0f);
+        expect (passesThroughUnchanged (wide, 2, 1024, 40), "stereo at 88.2 kHz: Mix fully left, audio unchanged");
+
+        // The repeats, through the real processor: with Mix fully right and Repeats fully left, an impulse comes back once, at the
+        // delay time the window shows (all eight Zones, Rate in the middle)
+        for (int zone = 0; zone < 8; ++zone)
+        {
+            MimicPhonProcessor q;
+            q.setPlayConfigDetails (2, 2, 48000.0, 512);
+            q.prepareToPlay (48000.0, 512);
+            resetAll (q);
+            setParameter (q, MphParams::mix, 1.0f);
+            setParameter (q, MphParams::repeats, 0.0f);
+            setParameter (q, MphParams::zone, (float) zone / 7.0f);
+            setParameter (q, MphParams::rate, 0.5f);
+
+            const double delaySamples = mph::core::freeDelaySeconds (zone, 0.5f) * 48000.0;
+            juce::AudioBuffer<float> buffer (2, 512);
+            juce::MidiBuffer midi;
+            std::vector<float> left;
+            const int totalBlocks = (int) ((delaySamples + 3000.0) / 512.0) + 1;
+            for (int b = 0; b < totalBlocks; ++b)
+            {
+                buffer.clear();
+                if (b == 0)
+                    buffer.setSample (0, 0, 1.0f);
+                q.processBlock (buffer, midi);
+                for (int i = 0; i < 512; ++i)
+                    left.push_back (buffer.getSample (0, i));
+            }
+            int peak = 20;
+            for (int i = 20; i < (int) left.size(); ++i)
+                if (std::abs (left[(size_t) i]) > std::abs (left[(size_t) peak]))
+                    peak = i;
+            expect (std::abs ((double) peak - delaySamples) <= 1.0 && std::abs (left[(size_t) peak]) > 0.5f,
+                    "Zone " + juce::String (zone) + ": the echo through the plugin falls at the delay time of the window (" + juce::String (delaySamples / 48.0, 1) + " ms)");
+            expect (std::abs (q.getEngine().getDelaySeconds() - (float) mph::core::freeDelaySeconds (zone, 0.5f)) < 1.0e-4f,
+                    "Zone " + juce::String (zone) + ": the engine's delay time is the one the window works out");
+        }
+
+        // Every control at an extreme, with Mix and the levels up too: always real numbers, never runaway
+        {
+            MimicPhonProcessor q;
+            q.setPlayConfigDetails (2, 2, 48000.0, 512);
+            q.prepareToPlay (48000.0, 512);
+            for (auto* param : q.getParameters())
+                param->setValueNotifyingHost (1.0f);
+            setParameter (q, MphParams::clear, 0.0f);
+            setParameter (q, MphParams::hold, 0.0f);
+            juce::AudioBuffer<float> buffer (2, 512);
+            juce::MidiBuffer midi;
+            juce::Random random (1234);
+            bool sane = true;
+            float biggest = 0.0f;
+            for (int b = 0; b < 400; ++b)
+            {
+                for (int c = 0; c < 2; ++c)
+                    for (int i = 0; i < 512; ++i)
+                        buffer.setSample (c, i, random.nextFloat() * 2.0f - 1.0f);
+                q.processBlock (buffer, midi);
+                for (int c = 0; c < 2; ++c)
+                    for (int i = 0; i < 512; ++i)
+                    {
+                        const float v = buffer.getSample (c, i);
+                        sane = sane && std::isfinite (v);
+                        biggest = std::max (biggest, std::abs (v));
+                    }
+            }
+            expect (sane && biggest < 20.0f, "every control at maximum with loud noise: real numbers, no runaway (largest sample " + juce::String (biggest, 2) + ")");
+
+            for (auto* param : q.getParameters())
+                param->setValueNotifyingHost (0.0f);
+            bool silent = true;
+            for (int b = 0; b < 40; ++b)
+            {
+                for (int c = 0; c < 2; ++c)
+                    for (int i = 0; i < 512; ++i)
+                        buffer.setSample (c, i, random.nextFloat() * 2.0f - 1.0f);
+                q.processBlock (buffer, midi);
+                if (b >= 20)                                  // the level knobs glide for a tenth of a second; after that it is exactly silent
+                    for (int c = 0; c < 2; ++c)
+                        for (int i = 0; i < 512; ++i)
+                            silent = silent && buffer.getSample (c, i) == 0.0f;
+            }
+            expect (silent, "every control at minimum (Output Level at 0): silence");
+        }
+
+        // The tail told to the host
+        {
+            MimicPhonProcessor q;
+            q.setPlayConfigDetails (2, 2, 48000.0, 512);
+            q.prepareToPlay (48000.0, 512);
+            resetAll (q);
+            juce::AudioBuffer<float> buffer (2, 512);
+            juce::MidiBuffer midi;
+            buffer.clear();
+            q.processBlock (buffer, midi);
+            expect (std::abs (q.getTailLengthSeconds() - 8.0 * 0.653) < 0.05, "starting positions: the tail told to Logic is about 5.2 s (8 echoes of 653 ms)");
+            setParameter (q, MphParams::repeats, 0.0f);
+            buffer.clear();
+            q.processBlock (buffer, midi);
+            expect (std::abs (q.getTailLengthSeconds() - 0.653) < 0.01, "Repeats fully left: the tail is one echo (653 ms)");
+            setParameter (q, MphParams::repeats, 0.83f);
+            buffer.clear();
+            q.processBlock (buffer, midi);
+            expect (q.getTailLengthSeconds() >= 100.0 && q.getTailLengthSeconds() <= 120.0, "Repeats at infinite: a long tail (the cap)");
+        }
+
+        // Clear, through the real processor: the repeats are gone at once
+        {
+            MimicPhonProcessor q;
+            q.setPlayConfigDetails (2, 2, 48000.0, 512);
+            q.prepareToPlay (48000.0, 512);
+            resetAll (q);
+            setParameter (q, MphParams::mix, 1.0f);
+            setParameter (q, MphParams::zone, 2.0f / 7.0f);       // Zone 2, 163 ms with Rate in the middle
+            setParameter (q, MphParams::repeats, 0.7f);
+            juce::AudioBuffer<float> buffer (2, 512);
+            juce::MidiBuffer midi;
+            juce::Random random (42);
+            float soundingBefore = 0.0f;
+            for (int b = 0; b < 200; ++b)
+            {
+                for (int c = 0; c < 2; ++c)
+                    for (int i = 0; i < 512; ++i)
+                        buffer.setSample (c, i, (random.nextFloat() * 2.0f - 1.0f) * 0.5f);
+                q.processBlock (buffer, midi);
+                if (b >= 150)
+                    for (int i = 0; i < 512; ++i)
+                        soundingBefore = std::max (soundingBefore, std::abs (buffer.getSample (0, i)));
+            }
+            expect (soundingBefore > 0.05f, "the repeats are sounding before Clear");
+
+            setParameter (q, MphParams::clear, 1.0f);
+            float after = 0.0f;
+            for (int b = 0; b < 40; ++b)
+            {
+                buffer.clear();
+                q.processBlock (buffer, midi);
+                for (int c = 0; c < 2; ++c)
+                    for (int i = 0; i < 512; ++i)
+                        after = std::max (after, std::abs (buffer.getSample (c, i)));
+            }
+            expect (after == 0.0f, "Clear: the repeats are gone in the very block it goes on, and stay gone in silence");
+        }
 
         // Layouts: mono and stereo are accepted; a mismatch or more channels is refused
         juce::AudioProcessor::BusesLayout layout;
@@ -567,7 +755,7 @@ int main (int argc, char** argv)
     {
         resetAll (proc);
         setParameter (proc, MphParams::clear, 1.0f);
-        passesThroughUnchanged (proc, 2, 512, 2);
+        processSeconds (proc, 0.02, 512);                 // one block: the engine notices Clear
         letWindowThreadRun (250);
         expect (parameterValue (proc, MphParams::clear) < 0.5f, "the Clear button switches itself off");
 
@@ -588,6 +776,17 @@ int main (int argc, char** argv)
     // ---------------- opening and closing the window while audio runs, at different sizes ----------------
     {
         resetAll (proc);
+        setParameter (proc, MphParams::mix, 0.0f);        // live signal only, so it can be compared bit for bit
+        {
+            // Mix glides for a tenth of a second: let it arrive before comparing
+            juce::AudioBuffer<float> quiet (2, 512);
+            juce::MidiBuffer midi;
+            for (int b = 0; b < 60; ++b)
+            {
+                quiet.clear();
+                proc.processBlock (quiet, midi);
+            }
+        }
         bool stillSame = true;
         const int widths[] = { 840, 1080, 1200, 1800 };
         for (int round = 0; round < 80; ++round)
@@ -598,7 +797,7 @@ int main (int argc, char** argv)
             stillSame = stillSame && passesThroughUnchanged (proc, 2, 512, 2);
             letWindowThreadRun (5);
         }
-        expect (stillSame, "audio unchanged while the window is opened and closed 80 times at four sizes");
+        expect (stillSame, "Mix fully left: audio unchanged while the window is opened and closed 80 times at four sizes");
 
         // The window keeps its 3:2 shape
         MimicPhonEditor editor (proc);

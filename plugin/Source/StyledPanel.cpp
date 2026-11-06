@@ -1,6 +1,7 @@
 #include "StyledPanel.h"
 #include <mph/core/Gain.h>
 #include <mph/core/HostClock.h>
+#include <mph/core/Repeats.h>
 #include <mph/core/ZoneMap.h>
 #include <cmath>
 
@@ -19,7 +20,8 @@ namespace
         return juce::String::fromUTF8 ("\xc2\xb5") + rest;
     }
 
-    // ---- read-outs (first guesses, tuned with the sound in the later milestones) ----
+    // ---- read-outs: Input / Output Level, Mix, Repeats and the delay time are the real thing since milestone 4 (same functions as the
+    //      engine); the others are still first guesses, tuned with the sound in the later milestones ----
 
     juce::String percentText (double value)
     {
@@ -38,6 +40,20 @@ namespace
     juce::String mixText (double value)
     {
         return juce::String (juce::roundToInt (value * 100.0)) + " % wet";
+    }
+
+    // Repeats: what is fed back each time round, from the engine's own law: one echo, "x 0.35" (each echo that much of the last),
+    // the flat stretch "infinite", and "inf +12 %" for beyond.
+    juce::String repeatsText (double value)
+    {
+        if (value <= 0.0)
+            return "one echo";
+        const float feedback = mph::core::repeatsToFeedback ((float) value);
+        if (feedback < 0.995f)
+            return "x " + juce::String (feedback, 2);
+        if (feedback < 1.0005f)
+            return "infinite";
+        return "inf +" + juce::String (juce::roundToInt ((feedback - 1.0f) * 100.0f)) + " %";
     }
 
     // Color: the words of the manual's description, from the darkest oil-can echo to a thin early digital delay line.
@@ -352,7 +368,7 @@ MimicPhonStyledPanel::MimicPhonStyledPanel (juce::AudioProcessorValueTreeState& 
     // ---- first row: Input Level, Mix, Repeats, Halo, Output Level ----
     auto& input  = addKnob (MphParams::inputLevel,  "INPUT LEVEL",  levelText);
     addKnob (MphParams::mix, "MIX", mixText);
-    auto& repeats = addKnob (MphParams::repeats,    "REPEATS");
+    auto& repeats = addKnob (MphParams::repeats,    "REPEATS", repeatsText);
     addKnob (MphParams::halo, "HALO");
     addKnob (MphParams::outputLevel, "OUTPUT LEVEL", levelText);
 
@@ -456,7 +472,8 @@ double MimicPhonStyledPanel::currentDelaySeconds() const
     const int zone = juce::jlimit (0, mph::kNumZones - 1, (int) std::lround (get (MphParams::zone)));
     const float rate = get (MphParams::rate);
 
-    if (get (MphParams::tempoSync) > 0.5f)
+    // Tempo Sync is built in milestone 8; until then the sound is free-running whatever the button says, so the read-out is too.
+    if (mph::kTempoSyncAudible && get (MphParams::tempoSync) > 0.5f)
     {
         const int division = juce::jlimit (0, mph::core::kNumClockDivisions - 1, (int) std::lround (get (MphParams::clockDivision)));
         double bpm = (double) engine.getHostBpm();
@@ -474,7 +491,7 @@ MimicPhonStyledPanel::Readout MimicPhonStyledPanel::getReadout() const
 
     Readout r;
     r.zone = juce::jlimit (0, mph::kNumZones - 1, (int) std::lround (get (MphParams::zone)));
-    r.synced = get (MphParams::tempoSync) > 0.5f;
+    r.synced = mph::kTempoSyncAudible && get (MphParams::tempoSync) > 0.5f;
     r.pingFlashing = get (MphParams::pingPong) > 0.5f;
 
     // With Skew on the Left and Right times will differ (milestone 6); for now both show the time of the Rate knob.

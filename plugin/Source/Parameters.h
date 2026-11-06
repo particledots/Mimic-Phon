@@ -3,7 +3,7 @@
 //
 // The short ids below are what Logic stores in saved projects and automation, so they must never be renamed or removed.
 // If a later milestone ever needs one more control, it gets a new id added at the end (and old projects open with it
-// at its starting position). Most of these do nothing yet: milestone 2 passes the audio through unchanged.
+// at its starting position). Milestone 4 made Zone, Rate, Repeats, Mix, Input Level, the Input Gain step, Output Level and Clear work; the rest still do nothing.
 //
 // Which milestone makes which control work (plan): Zone, Rate, Repeats, Mix, Input Level, Input Gain Step and
 // Output Level in 4; Color in 5; Skew, Ping Pong / Swap in 6; uRate and its LFO in 7; Tempo Sync, its Clock Division and
