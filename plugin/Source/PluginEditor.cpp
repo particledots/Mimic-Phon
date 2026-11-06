@@ -12,7 +12,7 @@ namespace
         return juce::Font (juce::FontOptions (height, bold ? juce::Font::bold : juce::Font::plain));
     }
 
-    // Layout, in the fixed 1200 x 800 space (the same 3:2 shape the styled panel will have).
+    // Layout, in the fixed 1200 x 800 space (the same 3:2 shape as the styled panel).
     constexpr int kLeft = 24, kLabelWidth = 150, kSliderWidth = 440, kTextBoxWidth = 80;
     constexpr int kRowHeight = 40, kFirstRowY = 92;
     constexpr int kButtonX = 800, kButtonWidth = 370, kButtonHeight = 40, kButtonGap = 8;
@@ -48,6 +48,11 @@ MimicPhonSliderPanel::MimicPhonSliderPanel (juce::AudioProcessorValueTreeState& 
     addButton (MphParams::clear,        "CLEAR");
     addButton (MphParams::tempoSync,    "TEMPO SYNC");
     addButton (MphParams::uRateLfoSync, "uRATE LFO SYNC");
+
+    // Back to the styled panel
+    styledPanelButton.setTooltip ("Switch to the styled panel");
+    styledPanelButton.onClick = [this] { if (onSwitchToStyled) onSwitchToStyled(); };
+    addAndMakeVisible (styledPanelButton);
 
     setSize (kWidth, kHeight);
 }
@@ -113,7 +118,7 @@ void MimicPhonSliderPanel::paint (juce::Graphics& g)
 
     g.setColour (kMuted);
     g.setFont (font (13.0f));
-    g.drawText ("Plain slider window", kLeft, 46, 330, 20, juce::Justification::centredLeft);
+    g.drawText ("Plain slider window (the styled panel is one click away, top right)", kLeft, 46, 560, 20, juce::Justification::centredLeft);
 
     g.setColour (kAmber);
     g.setFont (font (12.0f, true));
@@ -128,12 +133,13 @@ void MimicPhonSliderPanel::paint (juce::Graphics& g)
     g.drawRoundedRectangle (note.toFloat().reduced (0.5f), 6.0f, 1.0f);
     g.setColour (kAmber);
     g.setFont (font (12.0f, true));
-    g.drawText ("VERSION " JucePlugin_VersionString " - THE EMPTY BUILD", note.getX() + 14, note.getY() + 10, note.getWidth() - 28, 18,
+    g.drawText ("VERSION " JucePlugin_VersionString " - STILL NO REPEATS", note.getX() + 14, note.getY() + 10, note.getWidth() - 28, 18,
                 juce::Justification::centredLeft);
     g.setColour (kText);
     g.setFont (font (14.0f));
     g.drawFittedText ("The audio passes through unchanged. All the controls are here and can be moved and automated in Logic, "
-                      "but none of them makes a sound yet: the repeater is built in the next milestones.",
+                      "but none of them makes a sound yet: the repeater is built in the next milestones. "
+                      "The styled panel shows the same controls.",
                       note.getX() + 14, note.getY() + 34, note.getWidth() - 28, note.getHeight() - 44,
                       juce::Justification::topLeft, 6, 1.0f);
 
@@ -146,6 +152,8 @@ void MimicPhonSliderPanel::paint (juce::Graphics& g)
 
 void MimicPhonSliderPanel::resized()
 {
+    styledPanelButton.setBounds (kButtonX + kButtonWidth - 190, 22, 190, 34);
+
     int y = kFirstRowY;
     for (auto& row : sliders)
     {
@@ -177,6 +185,10 @@ namespace
     constexpr int kOpenWidth = 1080, kOpenHeight = 720;
     constexpr int kMinWidth  = 840,  kMinHeight  = 560;
     constexpr int kMaxWidth  = 1800, kMaxHeight  = 1200;
+
+    // Remembered in the saved project (not a control, so it does not touch automation): which window was showing.
+    // A project without it (saved before milestone 3) opens with the styled panel.
+    const char* const kViewProperty = "editorView";
 }
 
 MimicPhonEditor::MimicPhonEditor (MimicPhonProcessor& p)
@@ -185,28 +197,63 @@ MimicPhonEditor::MimicPhonEditor (MimicPhonProcessor& p)
 {
     plainLook.setColourScheme (juce::LookAndFeel_V4::getDarkColourScheme());
 
-    // The panel is laid out in a fixed space and scaled to the window, keeping its shape.
+    // The panels are laid out in a fixed space and scaled to the window, keeping its shape.
     setResizable (true, true);
     setResizeLimits (kMinWidth, kMinHeight, kMaxWidth, kMaxHeight);
     if (auto* aspect = getConstrainer())
         aspect->setFixedAspectRatio ((double) kOpenWidth / (double) kOpenHeight);
 
-    plain = std::make_unique<MimicPhonSliderPanel> (owner.getValueTreeState());
-    plain->setLookAndFeel (&plainLook);
-    addAndMakeVisible (*plain);
+    const bool plainWasShowing = owner.getValueTreeState().state.getProperty (kViewProperty).toString() == "plain";
+    showView (plainWasShowing ? View::plain : View::styled);
 
     setSize (kOpenWidth, kOpenHeight);
-    layOutPanel();
 }
 
 MimicPhonEditor::~MimicPhonEditor()
 {
+    styled.reset();
     plain.reset();
+}
+
+void MimicPhonEditor::showView (View view)
+{
+    styled.reset();
+    plain.reset();
+
+    if (view == View::styled)
+    {
+        styled = std::make_unique<MimicPhonStyledPanel> (owner.getValueTreeState(), owner.getEngine(), JucePlugin_VersionString);
+        styled->setLookAndFeel (&styledLook);
+        styled->onSwitchToPlain = [this] { requestView (View::plain); };
+        addAndMakeVisible (*styled);
+    }
+    else
+    {
+        plain = std::make_unique<MimicPhonSliderPanel> (owner.getValueTreeState());
+        plain->setLookAndFeel (&plainLook);
+        plain->onSwitchToStyled = [this] { requestView (View::styled); };
+        addAndMakeVisible (*plain);
+    }
+
+    owner.getValueTreeState().state.setProperty (kViewProperty, view == View::plain ? "plain" : "styled", nullptr);
+    layOutPanel();
+    repaint();
+}
+
+void MimicPhonEditor::requestView (View view)
+{
+    // Not switched straight away: the button that asked is part of the window being replaced.
+    juce::Component::SafePointer<MimicPhonEditor> safe (this);
+    juce::MessageManager::callAsync ([safe, view]
+    {
+        if (safe != nullptr)
+            safe->showView (view);
+    });
 }
 
 const std::vector<juce::String>& MimicPhonEditor::controlledParameterIds() const
 {
-    return plain->controlledParameterIds();
+    return styled != nullptr ? styled->controlledParameterIds() : plain->controlledParameterIds();
 }
 
 void MimicPhonEditor::paint (juce::Graphics& g)
@@ -216,11 +263,14 @@ void MimicPhonEditor::paint (juce::Graphics& g)
 
 void MimicPhonEditor::layOutPanel()
 {
-    if (plain == nullptr)
+    juce::Component* panel = styled != nullptr ? static_cast<juce::Component*> (styled.get()) : static_cast<juce::Component*> (plain.get());
+    if (panel == nullptr)
         return;
 
-    plain->setBounds (0, 0, MimicPhonSliderPanel::kWidth, MimicPhonSliderPanel::kHeight);
-    plain->setTransform (juce::AffineTransform::scale ((float) getWidth() / (float) MimicPhonSliderPanel::kWidth));
+    const int naturalWidth  = styled != nullptr ? MimicPhonStyledPanel::kWidth  : MimicPhonSliderPanel::kWidth;
+    const int naturalHeight = styled != nullptr ? MimicPhonStyledPanel::kHeight : MimicPhonSliderPanel::kHeight;
+    panel->setBounds (0, 0, naturalWidth, naturalHeight);
+    panel->setTransform (juce::AffineTransform::scale ((float) getWidth() / (float) naturalWidth));
 }
 
 void MimicPhonEditor::resized()

@@ -1,14 +1,18 @@
-// The plugin window. Milestone 2: the plain slider window, with one control for every parameter (all 21), using the
-// parameter ids from Parameters.h, so saved projects and automation work the same whatever window comes later.
-// Milestone 3 adds the styled panel (the approved mockup) next to it; this window then stays as the fallback.
+// The plugin window. It can show either the styled panel (milestone 3, the approved mockup; the default) or the plain
+// slider window (milestone 2), which stays available as a fallback. Both have one control for every parameter (all 21) and
+// use the same parameter ids from Parameters.h, so saved projects and automation work the same whichever is showing.
+// The choice of window is remembered in the saved project.
 //
-// The window is laid out in a fixed 1200 x 800 space and scaled to the window size, keeping its shape (3:2).
+// Each is laid out in its own fixed 1200 x 800 space and scaled to the window size, keeping its shape (3:2).
 
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "PluginProcessor.h"
+#include "PanelLookAndFeel.h"
+#include "StyledPanel.h"
 
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -27,6 +31,9 @@ public:
 
     // The ids of all parameters that have a control in this window (used by the check that none is missing).
     const std::vector<juce::String>& controlledParameterIds() const { return controlIds; }
+
+    // Called when the "Styled panel" button is pressed; the editor swaps windows.
+    std::function<void()> onSwitchToStyled;
 
 private:
     using SliderAttachment   = juce::AudioProcessorValueTreeState::SliderAttachment;
@@ -47,6 +54,7 @@ private:
     std::vector<std::unique_ptr<SliderRow>>  sliders;
     std::vector<std::unique_ptr<ChoiceRow>>  choices;
     std::vector<std::unique_ptr<ButtonItem>> buttons;
+    juce::TextButton styledPanelButton { "Styled panel" };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MimicPhonSliderPanel)
 };
@@ -60,14 +68,23 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
 
-    // For the automatic checks: the ids the window controls.
+    enum class View { styled, plain };
+    View getView() const { return styled != nullptr ? View::styled : View::plain; }
+    void showView (View);
+
+    // For the automatic checks: the window that is showing, and the ids it controls.
     const std::vector<juce::String>& controlledParameterIds() const;
+    MimicPhonStyledPanel* getStyledPanel() { return styled.get(); }
+    MimicPhonSliderPanel* getPlainPanel() { return plain.get(); }
 
 private:
+    void requestView (View);        // switches after the current click has finished
     void layOutPanel();
 
     MimicPhonProcessor& owner;
-    juce::LookAndFeel_V4 plainLook;        // declared before the panel, so it outlives it
+    juce::LookAndFeel_V4 plainLook;        // declared before the panels, so they outlive them
+    PanelLookAndFeel styledLook;
+    std::unique_ptr<MimicPhonStyledPanel> styled;
     std::unique_ptr<MimicPhonSliderPanel> plain;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MimicPhonEditor)

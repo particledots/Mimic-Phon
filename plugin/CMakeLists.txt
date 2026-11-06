@@ -1,6 +1,18 @@
 # The MimicPhon plugin wrapper: what Logic sees (AU / VST3) and the controls.
 # The sound itself lives in ../engine.
-# (The panel fonts, Space Grotesk and IBM Plex Mono, are added in milestone 3 with the styled panel.)
+
+# The fonts used by the styled panel (Space Grotesk and IBM Plex Mono, both free open-licence fonts; the licence texts sit
+# next to them in Fonts/). They are built into the plugin so it looks the same on every Mac.
+juce_add_binary_data(MimicPhonFonts
+    HEADER_NAME MphFontData.h
+    NAMESPACE   MphFontData
+    SOURCES
+        Fonts/SpaceGrotesk-Regular.ttf
+        Fonts/SpaceGrotesk-Medium.ttf
+        Fonts/SpaceGrotesk-Bold.ttf
+        Fonts/IBMPlexMono-Regular.ttf
+        Fonts/IBMPlexMono-Medium.ttf
+)
 
 juce_add_plugin(MimicPhon
     COMPANY_NAME                "particledots"
@@ -25,6 +37,10 @@ target_sources(MimicPhon PRIVATE
     Source/PluginProcessor.cpp
     Source/PluginEditor.h
     Source/PluginEditor.cpp
+    Source/PanelLookAndFeel.h
+    Source/PanelLookAndFeel.cpp
+    Source/StyledPanel.h
+    Source/StyledPanel.cpp
 )
 
 target_compile_definitions(MimicPhon PUBLIC
@@ -36,6 +52,7 @@ target_compile_definitions(MimicPhon PUBLIC
 target_link_libraries(MimicPhon
     PRIVATE
         mph_engine
+        MimicPhonFonts
         juce::juce_audio_processors
         juce::juce_gui_basics
     PUBLIC
@@ -43,8 +60,8 @@ target_link_libraries(MimicPhon
         juce::juce_recommended_warning_flags
 )
 
-# Optional, off by default (the GitHub build does not use it): a small program that draws the window to a picture
-# file and runs automatic checks on the controls, without needing Logic. Build with -DMPH_BUILD_PREVIEW=ON.
+# Optional, off by default (the GitHub build does not use it): a small program that draws the windows to picture
+# files and runs automatic checks on the controls, without needing Logic. Build with -DMPH_BUILD_PREVIEW=ON.
 option(MPH_BUILD_PREVIEW "Build the offline window preview and control checks" OFF)
 if(MPH_BUILD_PREVIEW)
     juce_add_console_app(MimicPhonPreview PRODUCT_NAME "MimicPhonPreview")
@@ -53,6 +70,8 @@ if(MPH_BUILD_PREVIEW)
         Source/Parameters.cpp
         Source/PluginProcessor.cpp
         Source/PluginEditor.cpp
+        Source/PanelLookAndFeel.cpp
+        Source/StyledPanel.cpp
     )
     target_include_directories(MimicPhonPreview PRIVATE Source)
     target_compile_definitions(MimicPhonPreview PRIVATE
@@ -63,6 +82,6 @@ if(MPH_BUILD_PREVIEW)
         JUCE_USE_CURL=0
     )
     target_link_libraries(MimicPhonPreview
-        PRIVATE mph_engine juce::juce_audio_processors juce::juce_gui_basics
+        PRIVATE mph_engine MimicPhonFonts juce::juce_audio_processors juce::juce_gui_basics
         PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
 endif()

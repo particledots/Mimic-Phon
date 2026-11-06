@@ -1,10 +1,12 @@
-// Self-test of the engine (milestone 2: pass-through, control list, tempo clock, level helpers).
+// Self-test of the engine (pass-through, control list, tempo clock, level helpers; milestone 3 adds the Zone / Rate time map and the
+// counters behind the window's lights).
 // Prints "engine tests: N checks, F failed" and exits with 0 only if nothing failed.
 
 #include <mph/Engine.h>
 #include <mph/Params.h>
 #include <mph/core/Gain.h>
 #include <mph/core/HostClock.h>
+#include <mph/core/ZoneMap.h>
 
 #include <cmath>
 #include <cstdint>
@@ -276,6 +278,169 @@ namespace
         expect (mph::dsp::softLimit (1.0e30f) == 1.0f && mph::dsp::softLimit (-1.0e30f) == -1.0f, "a huge input gives exactly full scale, not more");
         expect (odd, "soft limiter treats positive and negative alike");
     }
+    // ---- Zone and Rate in time (milestone 3, used by the window's read-outs and the lights) ----
+    void testZoneMap()
+    {
+        using namespace mph::core;
+
+        // Free running: knob fully left = the Zone's shortest time, fully right = its longest, the middle = the geometric middle
+        bool ends = true, middle = true, rising = true;
+        for (int z = 0; z < mph::kNumZones; ++z)
+        {
+            ends = ends && std::fabs (freeDelaySeconds (z, 0.0f) - mph::kZones[z].minSeconds) < 1.0e-12
+                        && std::fabs (freeDelaySeconds (z, 1.0f) - mph::kZones[z].maxSeconds) < 1.0e-9;
+            const double geo = std::sqrt (mph::kZones[z].minSeconds * mph::kZones[z].maxSeconds);
+            middle = middle && std::fabs (freeDelaySeconds (z, 0.5f) - geo) < 1.0e-9 * geo;
+            double last = 0.0;
+            for (int i = 0; i <= 100; ++i)
+            {
+                const double d = freeDelaySeconds (z, (float) i / 100.0f);
+                rising = rising && d > last;
+                last = d;
+            }
+        }
+        expect (ends, "Rate fully left / right gives the Zone's shortest / longest time (all 8 Zones)");
+        expect (middle, "Rate in the middle gives the geometric middle of the Zone");
+        expect (rising, "a higher Rate knob position always means a longer delay time (all 8 Zones)");
+        expect (std::fabs (freeDelaySeconds (4, 0.5f) - 0.6531) < 0.001, "Zone 4 with Rate in the middle is about 653 ms");
+        expect (freeDelaySeconds (-5, 0.5f) == freeDelaySeconds (0, 0.5f) && freeDelaySeconds (99, 0.5f) == freeDelaySeconds (7, 0.5f),
+                "a Zone outside 0..7 is clamped");
+        expect (freeDelaySeconds (3, -1.0f) == freeDelaySeconds (3, 0.0f) && freeDelaySeconds (3, 2.0f) == freeDelaySeconds (3, 1.0f),
+                "a Rate outside 0..1 is clamped");
+
+        // Tempo sync: 13 steps as in the manual
+        expect (kNumSyncSteps == 13, "13 multiples / divisions");
+        expect (kSyncFactors[kSyncUnityStep] == 1.0 && std::strcmp (kSyncNames[kSyncUnityStep], "1/1") == 0, "step 6 is 1/1");
+        expect (std::strcmp (kSyncNames[0], "x2") == 0 && kSyncFactors[0] == 2.0, "the left end is x2");
+        expect (std::strcmp (kSyncNames[12], "/2") == 0 && kSyncFactors[12] == 0.5, "the right end is /2");
+        bool falling = true;
+        for (int i = 1; i < kNumSyncSteps; ++i)
+            falling = falling && kSyncFactors[i] < kSyncFactors[i - 1];
+        expect (falling, "the factors fall steadily from the left end to the right end");
+        expect (std::fabs (kSyncFactors[1] - 1.75) < 1e-12 && std::fabs (kSyncFactors[5] - 1.25) < 1e-12 &&
+                std::fabs (kSyncFactors[7] * 1.25 - 1.0) < 1e-12 && std::fabs (kSyncFactors[11] * 1.75 - 1.0) < 1e-12,
+                "x1 3/4 is 1.75, x1 1/4 is 1.25, /1 1/4 divides by 1.25, /1 3/4 divides by 1.75");
+        expect (syncStep (0.0f) == 0 && syncStep (1.0f) == 12 && syncStep (0.5f) == 6, "Rate left / right / middle give step 0 / 12 / 6");
+        bool allReached = true, monotone = true;
+        int seen[kNumSyncSteps] = {};
+        int lastStep = 0;
+        for (int i = 0; i <= 1000; ++i)
+        {
+            const int s = syncStep ((float) i / 1000.0f);
+            allReached = allReached && s >= 0 && s < kNumSyncSteps;
+            if (s >= 0 && s < kNumSyncSteps) ++seen[s];
+            monotone = monotone && s >= lastStep;
+            lastStep = s;
+        }
+        for (int i = 0; i < kNumSyncSteps; ++i)
+            allReached = allReached && seen[i] > 0;
+        expect (allReached && monotone, "every one of the 13 steps can be reached, in order, and none outside");
+
+        // The Zone that fits a clock best, and the delay with sync
+        const double quarterAt120 = 0.5;
+        expect (bestZoneForPeriod (quarterAt120) == 4, "a clock of 500 ms fits Zone 4 best (its middle is 653 ms; Zone 3's is 327 ms)");
+        expect (bestZoneForPeriod (0.006) == 0 && bestZoneForPeriod (100.0) == 7, "very fast / very slow clocks fit Zone 0 / Zone 7");
+        expect (std::fabs (syncDelaySeconds (4, 0.5f, quarterAt120) - 0.5) < 1e-9, "1/1 in the best Zone is exactly the clock period");
+        expect (std::fabs (syncDelaySeconds (5, 0.5f, quarterAt120) - 1.0) < 1e-9, "one Zone up doubles it");
+        expect (std::fabs (syncDelaySeconds (3, 0.5f, quarterAt120) - 0.25) < 1e-9, "one Zone down halves it");
+        expect (std::fabs (syncDelaySeconds (4, 0.0f, quarterAt120) - 0.25) < 1e-9, "x2 halves it");
+        expect (std::fabs (syncDelaySeconds (4, 1.0f, quarterAt120) - 1.0) < 1e-9, "/2 doubles it");
+        bool inRange = true;
+        for (int z = 0; z < mph::kNumZones; ++z)
+            for (int i = 0; i <= 20; ++i)
+                for (double period : { 0.001, 0.05, 0.5, 4.0, 60.0 })
+                {
+                    const double d = syncDelaySeconds (z, (float) i / 20.0f, period);
+                    inRange = inRange && std::isfinite (d) && d >= mph::kZones[0].minSeconds - 1e-12 && d <= mph::kLongestSeconds + 1e-12;
+                }
+        expect (inRange, "the synced delay always stays inside the module's whole range");
+    }
+
+    // ---- the counters behind the window's lights, and Logic's tempo as last heard ----
+    void runSeconds (mph::Engine& e, double seconds, double sampleRate, int block)
+    {
+        std::vector<float> l ((size_t) block, 0.0f), r ((size_t) block, 0.0f);
+        float* chans[2] = { l.data(), r.data() };
+        long long total = (long long) (seconds * sampleRate);
+        while (total > 0)
+        {
+            const int n = (int) std::min<long long> (block, total);
+            e.process (chans, 2, n);
+            total -= n;
+        }
+    }
+
+    void testLights()
+    {
+        const double sr = 48000.0;
+        mph::Engine e;
+        e.prepare (sr, 512, 2);
+        expect (e.getHostBpm() == 0.0f, "no tempo heard yet");
+        mph::core::HostInfo host;
+        host.tempoValid = true;
+        host.bpm = 133.0;
+        host.beatsPerBar = 3.0;
+        e.setHost (host);
+        expect (std::fabs (e.getHostBpm() - 133.0f) < 1e-4f && std::fabs (e.getHostBeatsPerBar() - 3.0f) < 1e-4f,
+                "the tempo and bar length from Logic are kept for the window");
+        host.tempoValid = false;
+        e.setHost (host);
+        expect (e.getHostBpm() == 0.0f, "no tempo from Logic reads as 0");
+
+        // Tempo clock: 120 beats per minute, ticks every quarter note = 2 per second
+        host = {};
+        host.tempoValid = true;
+        host.bpm = 120.0;
+        e.setHost (host);
+        mph::Params p;
+        p.clockDivision = 3;                     // 1/4
+        e.setParams (p);
+        runSeconds (e, 10.0, sr, 512);
+        const int ticks = e.getClockTickCount();
+        expect (ticks >= 19 && ticks <= 21, "10 s at 120 BPM with a 1/4 clock gives about 20 ticks");
+
+        // Rate light, free running: Zone 4 with Rate in the middle is about 653 ms, so about 15 in 10 s
+        e.prepare (sr, 512, 2);
+        e.setHost (host);
+        p = {};
+        p.zone = 4;
+        p.rate = 0.5f;
+        e.setParams (p);
+        runSeconds (e, 10.0, sr, 512);
+        expect (e.getRateTickCount() >= 14 && e.getRateTickCount() <= 16, "the rate light counts about 15 times in 10 s (Zone 4, Rate in the middle)");
+
+        // Same total with another block size: the counters do not depend on how Logic cuts the audio
+        e.prepare (sr, 4096, 2);
+        e.setHost (host);
+        e.setParams (p);
+        runSeconds (e, 10.0, sr, 4096);
+        expect (e.getRateTickCount() >= 14 && e.getRateTickCount() <= 16, "... and the same with 4096-sample blocks");
+
+        // Very short delay (Zone 0, shortest): many counts, and no overflow trouble in a huge block
+        e.prepare (sr, 8192, 2);
+        e.setHost (host);
+        p = {};
+        p.zone = 0;
+        p.rate = 0.0f;
+        e.setParams (p);
+        runSeconds (e, 1.0, sr, 8192);
+        expect (e.getRateTickCount() >= 700 && e.getRateTickCount() <= 800, "Zone 0 at the shortest time counts about 770 times a second");
+
+        // Tempo sync: 1/1 in the best Zone is the clock period (500 ms at 120 BPM, 1/4), so 2 a second
+        e.prepare (sr, 512, 2);
+        e.setHost (host);
+        p = {};
+        p.zone = 4;
+        p.rate = 0.5f;
+        p.tempoSync = true;
+        e.setParams (p);
+        runSeconds (e, 10.0, sr, 512);
+        expect (e.getRateTickCount() >= 19 && e.getRateTickCount() <= 21, "with Tempo Sync, 1/1 repeats once per clock tick");
+
+        // Preparing again starts the counters from 0
+        e.prepare (sr, 512, 2);
+        expect (e.getClockTickCount() == 0 && e.getRateTickCount() == 0, "prepare starts the counters again from 0");
+    }
 }
 
 int main()
@@ -286,6 +451,8 @@ int main()
     testClear();
     testClock();
     testGain();
+    testZoneMap();
+    testLights();
 
     std::printf ("engine tests: %d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;
