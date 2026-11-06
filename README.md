@@ -5,7 +5,7 @@ Make Noise / soundhack Mimeophon): eight Zones of delay time from a millisecond 
 moves smoothly inside each Zone, repeats up to infinite, and colour and stereo smear on the repeats. All DSP is our own
 code; it is not a port or copy of anything, and it is not affiliated with Make Noise or soundhack.
 
-**Status: version 0.2.0 (milestone 2: the empty build).** Built and checked automatically; **0.2.0 has not been tested in
+**Status: version 0.2.0 (milestone 2: the empty build).** Built and checked automatically (all green on GitHub's Mac); **0.2.0 has not been tested in
 Logic yet.** Milestone 1 (the panel picture) was approved on 6 November 2026. **The plugin makes no sound of its own yet:
 the audio passes through unchanged and none of the controls does anything audible.** The repeater is built in the next milestones.
 
@@ -62,7 +62,7 @@ is done by hand on the real Macs.
 
 - **Engine self-tests (128 checks):** the control list and its starting positions; the eight Zone ranges against the manual; the audio coming out of the engine bit for bit equal to what went in (mono and stereo, 44.1, 48 and 88.2 kHz, block sizes from 1 to 4096 samples, random control values and buttons, special values including not-a-number); the Clear button noticed once; the tempo clock (ticks per second at different tempos, sample rates and divisions); the level helpers. All pass, also under a memory-error and undefined-behaviour checker. Run on a Linux test computer.
 - **Plugin side (preview tool, 91 checks):** the 21 control ids are exactly the frozen list; each control changes exactly one parameter and each parameter has exactly one control; Logic-style automation moves the controls; values survive saving and reloading; the real plugin passes audio through bit for bit (mono, stereo, 44.1 / 48 / 88.2 kHz, block sizes 1 to 4096, with every control at default, at maximum and at minimum); the Clear button switches itself off; a project saved with Clear on opens with it off; the window opened and closed 80 times at four sizes while audio ran; mono and stereo layouts accepted and others refused. The window was drawn to a picture and looked at. Run on a Linux test computer, not on the M4 or the Intel Mac.
-- **Apple's validator, pluginval and the universal-binary check:** the GitHub build runs `auval` (`auval -v aufx Mph1 Pdot`), `pluginval` (strictness level 5, AU and VST3) and a check that the plugin contains both Apple Silicon and Intel code. Their results for this version are not recorded here yet.
+- **GitHub build on a Mac (run #1, commit 0198f28, both jobs green):** the engine self-test job reported 128 checks, 0 failed; the macOS job compiled the AU and VST3, `auval -v aufx Mph1 Pdot` reported **AU VALIDATION SUCCEEDED**, `pluginval` 1.0.4 **passed at strictness level 5** for both the AU and the VST3, and the package contains both architectures (`x86_64 arm64`). The same package is the **MimicPhon-macOS** download under Artifacts and a private draft release.
 - **Tested in Logic:** not yet. This is what the next step is: on the M4 Mac mini (macOS Tahoe, Logic 11.2.2) and the Intel Mac (macOS 12.7.8, Logic 10.7.8).
 
 ## What changed in 0.2.0

@@ -21,7 +21,7 @@ and passes the audio through unchanged; there is no repeater yet.
 - **Engine skeleton** (`engine/`): `Params.h` (control values, the Zone table from the manual, input gain steps), `Engine.h` (pass-through),
   `core/HostClock.h` (Logic's tempo clock, copied from PhenomeEon without its Morphagene-only tables) and `core/Gain.h` (level knob curve,
   decibels, soft limiter, copied from PhenomeEon without the Sound On Sound law and loop fades).
-- **Checked before hand-over** (on a Linux test computer): 128 engine checks and 91 plugin-side checks (see the README).
+- **Checked before hand-over:** on a Linux test computer, 128 engine checks and 91 plugin-side checks (see the README). On GitHub's Mac (run #1, both jobs green): 128 engine checks again, `auval` AU VALIDATION SUCCEEDED, `pluginval` passed at strictness level 5 for AU and VST3, package archs `x86_64 arm64`.
 - **Soft limiter note:** the copied soft limiter never goes above 1.0, but in single precision it reaches exactly 1.0 for very loud
   input (above about 2.6); its comment now says so (PhenomeEon's comment says it never reaches 1.0, which is true only on paper).
 
