@@ -103,6 +103,8 @@ namespace mph
         dsp::DelayBuffer buffers[2];
         float dcIn[2] = { 0.0f, 0.0f }, dcOut[2] = { 0.0f, 0.0f };      // the DC blocker in the feedback path (one per channel)
         float dcCoefficient = 0.9993f;
+    float levelEnv[2] = { 0.0f, 0.0f }, levelGain[2] = { 1.0f, 1.0f };   // the leveller in the feedback path (one per channel)
+    float levelAttack = 0.02f, levelRelease = 0.0001f, envRelease = 0.9999f;
         bool started = false;                              // false until the first block after prepare(): then everything snaps to its setting
         bool clearWasOn = false;
         int lastZone = -1;
@@ -110,7 +112,7 @@ namespace mph
         int current = 0;                                   // which read point is the audible one
         bool fading = false;                               // crossfading to the other read point (a Zone change)
         float fadePosition = 0.0f, fadeStep = 0.001f;
-        float delayCoefficient = 0.0005f;                  // how fast Rate glides (one-pole, about 80 ms)
+        float delayCoefficient = 0.0005f;                  // how fast Rate glides (one-pole, about 160 ms)
         float rampCoefficient = 0.002f;                    // how fast the level controls glide (one-pole, about 10 ms)
         Ramp inputGain, outputGain, dryGain, wetGain, feedback;
 

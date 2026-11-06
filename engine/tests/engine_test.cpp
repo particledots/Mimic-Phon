@@ -348,7 +348,20 @@ namespace
             std::vector<float> m (9600 * 62, 0.0f);
             m[0] = 1.0f;
             processAll (loud, m, nullptr, 512);
-            expect (m[9600 * 60] > 0.8f && m[9600 * 60] < 0.9f, "Repeats at infinite: a full-scale sound settles just above the limiter's knee and stays");
+            expect (m[9600 * 60] > 0.4f && m[9600 * 60] < 0.6f && m[9600 * 60] > 0.9f * m[9600 * 30], "Repeats at infinite: a full-scale sound is levelled to about 0.5 and stays");
+
+            // Beyond infinite, short delay (Bryn's Logic test): the repeats grow slowly, then are held at a steady level - no harsh runaway
+            mph::Engine beyond;
+            beyond.prepare (48000.0, 512, 2);
+            beyond.setParams (repeatsOnly (2, rateForDelay (2, 0.02), 1.0f));
+            std::vector<float> b (48000 * 30, 0.0f);
+            b[0] = 0.3f;
+            processAll (beyond, b, nullptr, 512);
+            float peakLate = 0.0f;
+            for (size_t i = b.size() - 24000; i < b.size(); ++i)
+                peakLate = std::max (peakLate, std::fabs (b[i]));
+            expect (peakLate > 0.3f && peakLate < 0.7f, "Beyond infinite, 20 ms: after 30 s the loop sits at a steady level (about 0.6), not clipping");
+            expect (b[48000 * 3] < 0.45f, "Beyond infinite, 20 ms: growth is slow (still quiet after 3 s)");
         }
 
         // The longest delay of the module: Zone 7, Rate fully right, 41.796 s
