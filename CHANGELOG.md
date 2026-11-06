@@ -7,7 +7,7 @@ Version 0.3.1 (milestone 3, small fixes after Bryn's first Logic test; **not yet
 
 - **Clear now shows itself:** Clear switches itself off the instant the engine has handled it, so the button was never seen lit. In the styled panel it now stays lit for about a third of a second after each click. (The control, its id and its behaviour are unchanged.)
 - **Easier to read:** the small grey texts (notes under the knobs, the DARK / unity / THIN marks, the Zone staircase ranges, the DELAY / TICK / RATE labels, the tempo line, the LFO RATE / DEPTH labels, the footer) are larger, and the grey itself is lighter. The note under Repeats is shortened to "ONE ECHO ... INFINITE+" so it fits at the bigger size.
-- Checks on the Linux test computer: engine 159, window 197, all passing. GitHub's Mac build result for this version is recorded in the README once it has run.
+- Checks on the Linux test computer: engine 159, window 197, all passing. **GitHub's Mac build (run #6, commit 8441fb1, both jobs green):** 159 engine checks, `auval` AU VALIDATION SUCCEEDED, `pluginval` strictness 5 passed for AU and VST3, archs `x86_64 arm64`.
 
 Version 0.3.0 (milestone 3, the styled panel; **not yet tested in Logic**). The window from the approved picture. Still no repeater.
 
