@@ -202,6 +202,8 @@ private:
     juce::ComboBox clockBox;
     std::unique_ptr<ComboBoxAttachment> clockAttachment;
     juce::TextButton plainSliders { "PLAIN SLIDERS" };
+    juce::TextButton* clearButton = nullptr;
+    int clearGlow = 0;
 
     // What was last drawn in the Zone band (so it is redrawn only when something changed).
     Readout shown;

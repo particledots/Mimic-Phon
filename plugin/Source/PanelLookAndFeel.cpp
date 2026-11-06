@@ -146,7 +146,7 @@ void PanelLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& bu
     using namespace MphStyle;
 
     const auto r = button.getLocalBounds().toFloat().reduced (0.5f);
-    const bool on = button.getToggleState();
+    const bool on = button.getToggleState() || (bool) button.getProperties().getWithDefault ("glow", false);
     const bool usable = button.isEnabled();
     juce::Colour onColour = amber;
     if (button.getProperties().contains ("onColour"))
@@ -188,7 +188,7 @@ void PanelLookAndFeel::drawButtonText (juce::Graphics& g, juce::TextButton& butt
 {
     using namespace MphStyle;
 
-    const bool on = button.getToggleState();
+    const bool on = button.getToggleState() || (bool) button.getProperties().getWithDefault ("glow", false);
     const bool usable = button.isEnabled();
 
     g.setFont (getTextButtonFont (button, button.getHeight()));

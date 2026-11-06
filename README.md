@@ -5,7 +5,7 @@ Make Noise / soundhack Mimeophon): eight Zones of delay time from a millisecond 
 moves smoothly inside each Zone, repeats up to infinite, and colour and stereo smear on the repeats. All DSP is our own
 code; it is not a port or copy of anything, and it is not affiliated with Make Noise or soundhack.
 
-**Status: version 0.3.0 (milestone 3: the styled panel). Checked on a Linux test computer and by GitHub's Mac build (run #4, all green); not yet tested in Logic.**
+**Status: version 0.3.1 (milestone 3: the styled panel, with two small fixes after the first Logic test). Checked on a Linux test computer; 0.3.0 was also checked by GitHub's Mac build (run #4, all green). Version 0.3.0 was tried in Logic on both test Macs and worked as described apart from the two things fixed here (Clear showed no sign of being clicked; some small grey text was too small). Version 0.3.1 is not yet tested in Logic.**
 Version 0.2.0 (the empty build) was tested in Logic on both test Macs on 6 November 2026 and worked as described; the panel picture
 (milestone 1) was approved the same day. **The plugin still makes no sound of its own: the audio passes through unchanged and
 none of the controls does anything audible.** The repeater is built in the next milestones. What is new is the window.

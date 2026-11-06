@@ -3,6 +3,12 @@
 The detailed notes for each milestone, newest first. A version is listed as tested only after it has been tested in Logic on both
 test Macs (the M4 Mac mini and the Intel Mac) and worked as described. The README describes the current version.
 
+Version 0.3.1 (milestone 3, small fixes after Bryn's first Logic test; **not yet tested in Logic**). Bryn tested 0.3.0 on both Macs: everything worked as described, with two things to fix.
+
+- **Clear now shows itself:** Clear switches itself off the instant the engine has handled it, so the button was never seen lit. In the styled panel it now stays lit for about a third of a second after each click. (The control, its id and its behaviour are unchanged.)
+- **Easier to read:** the small grey texts (notes under the knobs, the DARK / unity / THIN marks, the Zone staircase ranges, the DELAY / TICK / RATE labels, the tempo line, the LFO RATE / DEPTH labels, the footer) are larger, and the grey itself is lighter. The note under Repeats is shortened to "ONE ECHO ... INFINITE+" so it fits at the bigger size.
+- Checks on the Linux test computer: engine 159, window 197, all passing. GitHub's Mac build result for this version is recorded in the README once it has run.
+
 Version 0.3.0 (milestone 3, the styled panel; **not yet tested in Logic**). The window from the approved picture. Still no repeater.
 
 - **Styled panel** (`plugin/Source/StyledPanel.*`), after `MimicPhon_panel_mockup_1.png`: title and header, the Zone band (big coloured Zone window,

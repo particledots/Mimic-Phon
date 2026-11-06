@@ -335,7 +335,7 @@ void LfoCard::paint (juce::Graphics& g)
     g.drawText (muRate ("RATE LFO"), juce::Rectangle<int> (0, 10, getWidth(), 22), juce::Justification::centred, false);
 
     g.setColour (muted);
-    g.setFont (sans (12.5f, false, 0.14f));
+    g.setFont (sans (14.5f, false, 0.14f));
     g.drawText ("RATE",  juce::Rectangle<int> (14, 137, 80, 18), juce::Justification::centred, false);
     g.drawText ("DEPTH", juce::Rectangle<int> (114, 137, 80, 18), juce::Justification::centred, false);
 
@@ -360,9 +360,9 @@ MimicPhonStyledPanel::MimicPhonStyledPanel (juce::AudioProcessorValueTreeState& 
     gainChips = std::make_unique<ChipSelector> (state, MphParams::inputGain);
     controlIds.push_back (MphParams::inputGain);
     input.addExtra (*gainChips, { 10, 184, 170, 26 });
-    input.addNote ("dB", { 184, 184, 20, 26 }, juce::Justification::centredLeft, 11.5f, true);
+    input.addNote ("dB", { 184, 184, 20, 26 }, juce::Justification::centredLeft, 14.0f, true);
 
-    repeats.addNote ("ONE ECHO ... INFINITE ... BEYOND", { 4, 188, 200, 20 }, juce::Justification::centred, 9.5f, true);
+    repeats.addNote ("ONE ECHO ... INFINITE+", { 4, 186, 200, 24 }, juce::Justification::centred, 13.5f, false);
 
     // ---- second row: Zone, Color, Rate, uRate, uRate LFO ----
     auto& zone = addKnob (MphParams::zone, "ZONE", zoneText);
@@ -372,18 +372,18 @@ MimicPhonStyledPanel::MimicPhonStyledPanel (juce::AudioProcessorValueTreeState& 
 
     auto& color = addKnob (MphParams::color, "COLOR", colorText);
     color.addMark (5.0 / 6.0, teal);                        // unity, about 3:00
-    color.addNote ("DARK",  { 10, 188, 60, 20 },  juce::Justification::centredLeft,  11.0f, true);
-    color.addNote ("unity", { 74, 188, 60, 20 },  juce::Justification::centred,      11.0f, true, teal);
-    color.addNote ("THIN",  { 138, 188, 60, 20 }, juce::Justification::centredRight, 11.0f, true);
+    color.addNote ("DARK",  { 10, 188, 60, 20 },  juce::Justification::centredLeft,  13.5f, true);
+    color.addNote ("unity", { 74, 188, 60, 20 },  juce::Justification::centred,      13.5f, true, teal);
+    color.addNote ("THIN",  { 138, 188, 60, 20 }, juce::Justification::centredRight, 13.5f, true);
 
     auto& rate = addKnob (MphParams::rate, "RATE", [this] (double) { return getReadout().rateText; });
     rate.addMark (0.5, teal);                               // 1/1 with Tempo Sync, about 12:00
-    rate.addNote ("with Skew on: pulls L and R apart", { 6, 186, 196, 24 }, juce::Justification::centred, 11.5f);
+    rate.addNote ("with Skew on: pulls L and R apart", { 6, 186, 196, 24 }, juce::Justification::centred, 13.5f);
     rateCard = &rate;
 
     auto& uRate = addKnob (MphParams::uRate, muRate ("RATE"), uRateText);
     uRate.addMark (0.5);
-    uRate.addNote ("doppler: chorus / vibrato / flange", { 6, 186, 196, 24 }, juce::Justification::centred, 11.5f);
+    uRate.addNote ("doppler: chorus / vibrato / flange", { 6, 186, 196, 24 }, juce::Justification::centred, 13.5f);
 
     lfoCard = std::make_unique<LfoCard> (state);
     addAndMakeVisible (*lfoCard);
@@ -398,6 +398,10 @@ MimicPhonStyledPanel::MimicPhonStyledPanel (juce::AudioProcessorValueTreeState& 
     addPanelButton (MphParams::skew,     "SKEW");
     addPanelButton (MphParams::pingPong, "PING PONG / SWAP");
     addPanelButton (MphParams::clear,    "CLEAR");
+    // Clear switches itself off at once (the engine has done its job), so the button would never be seen lit.
+    // Show it lit for about a third of a second so a click is visible.
+    clearButton = &buttons.back()->button;
+    clearButton->onClick = [this] { clearGlow = 10; clearButton->getProperties().set ("glow", true); clearButton->repaint(); };
     addPanelButton (MphParams::tempoSync, "TEMPO SYNC", teal);
 
     if (auto* p = dynamic_cast<juce::AudioParameterChoice*> (state.getParameter (MphParams::clockDivision)))
@@ -504,6 +508,12 @@ void MimicPhonStyledPanel::timerCallback()
     const auto r = getReadout();
     bool bandChanged = false;
 
+    if (clearGlow > 0 && --clearGlow == 0 && clearButton != nullptr)
+    {
+        clearButton->getProperties().set ("glow", false);
+        clearButton->repaint();
+    }
+
     // The two lights: lit for about 130 ms after each tick
     const bool tickWas = tickPulse > 0, rateWas = ratePulse > 0;
     const int ticks = engine.getClockTickCount(), rateTicks = engine.getRateTickCount();
@@ -569,7 +579,7 @@ void MimicPhonStyledPanel::paintZoneBand (juce::Graphics& g)
 
     // The staircase: each Zone holds the ones above it
     g.setColour (muted);
-    g.setFont (mono (12.0f));
+    g.setFont (mono (14.0f));
     g.drawText ("ZONES (each one holds the ones above it)", juce::Rectangle<int> (kStairX - 6, 100, 520, 18), juce::Justification::centredLeft, false);
 
     for (int i = 0; i < mph::kNumZones; ++i)
@@ -580,7 +590,7 @@ void MimicPhonStyledPanel::paintZoneBand (juce::Graphics& g)
         const auto colour = zoneColour (i);
 
         g.setColour (selected ? text : muted);
-        g.setFont (mono (12.0f, selected));
+        g.setFont (mono (14.0f, selected));
         g.drawText (juce::String (i), juce::Rectangle<int> (kStairX - 22, y - 7, 14, 14), juce::Justification::centredLeft, false);
 
         g.setColour (selected ? colour : colour.interpolatedWith (card, 0.66f));
@@ -590,7 +600,7 @@ void MimicPhonStyledPanel::paintZoneBand (juce::Graphics& g)
         // The range, after the bar (the label without its "0: " in front)
         const juce::String range = juce::String (mph::kZones[i].label).fromFirstOccurrenceOf (": ", false, false);
         g.setColour (selected ? text : muted);
-        g.setFont (mono (12.0f, selected));
+        g.setFont (mono (14.0f, selected));
         g.drawText (range, juce::Rectangle<int> (x + kStairWidths[i] + 8, y - 8, 190, 16), juce::Justification::centredLeft, false);
     }
 
@@ -603,7 +613,7 @@ void MimicPhonStyledPanel::paintZoneBand (juce::Graphics& g)
 
         const int x = kReadoutBox.getX(), y = kReadoutBox.getY();
         g.setColour (muted);
-        g.setFont (mono (12.0f));
+        g.setFont (mono (14.0f));
         g.drawText ("DELAY", juce::Rectangle<int> (x + 18, y + 11, 80, 18), juce::Justification::centredLeft, false);
         g.drawText ("TICK", juce::Rectangle<int> (x + 158, y + 11, 40, 18), juce::Justification::centredRight, false);
         g.drawText ("RATE", juce::Rectangle<int> (x + 158, y + 34, 40, 18), juce::Justification::centredRight, false);
@@ -623,7 +633,7 @@ void MimicPhonStyledPanel::paintZoneBand (juce::Graphics& g)
         g.drawText ("R  " + shown.delayRight, juce::Rectangle<int> (x + 18, y + 62, 200, 28), juce::Justification::centredLeft, false);
 
         g.setColour (text);
-        g.setFont (mono (12.5f));
+        g.setFont (mono (14.0f));
         g.drawText (shown.tempo, juce::Rectangle<int> (x + 18, y + 96, 200, 20), juce::Justification::centredLeft, false);
     }
 }
@@ -637,14 +647,14 @@ void MimicPhonStyledPanel::paint (juce::Graphics& g)
     g.setFont (sans (46.0f, true, 0.12f));
     g.drawText ("MIMIC-PHON", juce::Rectangle<int> (kMargin, 16, 560, 48), juce::Justification::centredLeft, false);
     g.setColour (muted);
-    g.setFont (mono (14.5f));
+    g.setFont (mono (16.0f));
     g.drawText ("particledots / stereo multi-zone colour repeater", juce::Rectangle<int> (kMargin + 2, 56, 640, 22), juce::Justification::centredLeft, false);
 
     paintZoneBand (g);
 
     // Footer
     g.setColour (muted);
-    g.setFont (mono (12.5f));
+    g.setFont (mono (14.0f));
     g.drawText ("Mimic-Phon v" + versionText + " - an original effect inspired by the feel of a stereo multi-zone repeater; "
                 "not affiliated with Make Noise or soundhack",
                 juce::Rectangle<int> (kMargin, 772, kWidth - 2 * kMargin, 20), juce::Justification::centredLeft, false);

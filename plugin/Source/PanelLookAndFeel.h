@@ -23,7 +23,7 @@ namespace MphStyle
     inline const juce::Colour amber      { 0xffe8a33d };   // values and selection
     inline const juce::Colour teal       { 0xff4fb3a9 };   // tick light, unity mark, Tempo Sync when on
     inline const juce::Colour text       { 0xffe9e6df };
-    inline const juce::Colour muted      { 0xffa8a59d };
+    inline const juce::Colour muted      { 0xffcfccc3 };
 
     // The eight Zone colours (manual p. 10): 0 green, 1 lime, 2 yellow, 3 orange, 4 red, 5 magenta, 6 lilac, 7 blue.
     inline constexpr int kNumZoneColours = 8;
