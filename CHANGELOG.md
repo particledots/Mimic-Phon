@@ -11,6 +11,7 @@ Version 0.5.0 (milestone 5, Color; **not yet tested in Logic**). Color makes sou
 - **Window:** the Color card shows the word from the engine's own function (oil can, warm BBD, crunch BBD, tape, clean, crisp, thin), and its teal mark now sits exactly on the engine's unity position (0.80; it was at 0.83 in the first guess). The plain window's note says Color works now. Version in the footer.
 - **Milestone 4 finished:** 0.4.1 (GitHub run #11, commit 89adb1f, every step green) was tested in Logic on both Macs on 6 November 2026 and everything is fixed.
 - Engine self-test: 281 checks (35 new: the knob's law and words, unity bit for bit through echoes, dark and thin by measurement, each echo shaped once more, extremes at infinite and beyond for 20 s, no click when Color jumps, block sizes, 44.1 to 192 kHz, Clear). Also run under a memory-error and undefined-behaviour checker. Processor cost on the Linux test computer: about 0.4 % of one core with Color at unity, about 0.7 % turned either way (60 s stereo at 48 kHz).
+- **GitHub's Mac build (run #12, commit 62dad86, both jobs green):** 281 engine checks, universal build, ad-hoc signing, `auval`, `pluginval` strictness 5 for AU and VST3, package: every step passed.
 - No control id changed.
 - **Not tested in Logic yet.**
 
