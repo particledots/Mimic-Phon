@@ -3,13 +3,28 @@
 The detailed notes for each milestone, newest first. A version is listed as tested only after it has been tested in Logic on both
 test Macs (the M4 Mac mini and the Intel Mac) and worked as described. The README describes the current version.
 
-Version 0.3.1 (milestone 3, small fixes after Bryn's first Logic test; **not yet tested in Logic**). Bryn tested 0.3.0 on both Macs: everything worked as described, with two things to fix.
+Version 0.4.0 (milestone 4, the core repeater; **not yet tested in Logic**). The plugin makes sound for the first time.
+
+- **What works now:** Input Level and the Input Gain step, Zone, Rate, Repeats, Mix, Output Level and Clear. Color, Halo, Skew, Ping Pong / Swap, uRate and its LFO, Tempo Sync, Flip and Hold are read but do nothing (milestones 5 to 11). Left and right are independent until Skew and Ping Pong / Swap.
+- **One shared memory for all eight Zones** (`core/DelayBuffer.h`): a stereo buffer of 41.8 seconds plus a little (about 16 MB at 48 kHz, 64 MB at 192 kHz), read with cubic interpolation. A Zone is only a different delay time to read at, so switching to a longer Zone brings back older sound. The delay time is `core::freeDelaySeconds(zone, rate)` from `ZoneMap.h`, the same function the window uses.
+- **Rate glides, Zone jumps:** Rate moves the delay time through a one-pole glide of about 80 ms in the logarithm of the time, so the repeats bend in pitch (doppler) while it moves. A Zone change aims a second read point at the new time and crossfades to it over 20 ms: no pitch effect. A Zone change during a crossfade re-aims the incoming read point (the fade continues).
+- **Repeats** (`core/Repeats.h`): the feedback is 0 at the left end (one echo), rises along t to the power 1.5 to exactly 1.0 at knob position 0.80, stays at exactly 1.0 ("infinite") until 0.86, then rises to 1.12 at the right end ("beyond"). The feedback goes through a 5 Hz DC blocker and the soft limiter (knee at 0.8, from `Gain.h`) before it is written back, so it saturates and never runs away. The limiter is on the feedback only: the input is written at full level, so one echo of a hot signal is not squashed.
+- **Mix** is an equal-power balance (cosine / sine) between the live signal and the repeats; **Input Level** with the gain step and **Output Level** use the level-knob curve from `Gain.h`. Levels, Mix and Repeats glide over about 10 ms (no zipper noise) and land exactly on their setting, so Mix fully left with levels at 0 dB is bit for bit the live signal. (The glides run in double precision: a first version in single precision stalled a hair short of its target, which the checks caught.)
+- **Clear** marks everything written so far as silent (all Zones at once, no pause in the audio, nothing erased) and empties the feedback path's memory; it acts once, when the button goes on.
+- **Tail:** `getTailLengthSeconds()` tells Logic how long the repeats keep sounding with the current settings: the delay time times the number of echoes to fall 60 dB (plus the first), one delay time for one echo, capped at 120 s (infinite and beyond give the cap).
+- **Bad samples** (not-a-number, infinity) at the input are replaced by silence so they can never get into the feedback.
+- **Tempo Sync** is still not audible: `mph::kTempoSyncAudible` is false, so the sound and the window both use the free-running time whatever the Tempo Sync button says (milestone 8 switches it on). The TICK light still follows Logic's tempo; the RATE light counts at the delay time actually used.
+- **Window:** Repeats reads "one echo", "x 0.35", "infinite" or "inf +12 %" from the engine's own law; the delay and Rate read-outs follow the engine; a `getReadoutText()` on the knob cards lets the checks read what a card shows. The plain window's note says what works and what is still silent. Version in the footer.
+- **Checked before hand-over (Linux test computer):** 244 engine checks (85 new, and the old "audio passes through unchanged" checks replaced by the Mix-fully-left version) and 225 plugin-side checks (28 new), all passing, the engine tests also under a memory-error and undefined-behaviour checker; pictures drawn and looked at. **GitHub's Mac build (run #8, commit b0b0f3f, both jobs green):** 244 engine checks, `auval` AU VALIDATION SUCCEEDED, `pluginval` 1.0.4 strictness 5 passed for AU and VST3, archs `x86_64 arm64`, private draft release `test-build-8`. Processor cost on the Linux test computer: about 0.4 % of one core for stereo at 48 kHz and 0.8 % at 96 kHz (a 60-second run with Zone changes).
+- **Not tested in Logic yet.**
+
+Version 0.3.1 (milestone 3, small fixes after Bryn's first Logic test; **tested in Logic on both Macs on 6 November 2026 and working as described: "all good, much better"**). Bryn tested 0.3.0 on both Macs: everything worked as described, with two things to fix.
 
 - **Clear now shows itself:** Clear switches itself off the instant the engine has handled it, so the button was never seen lit. In the styled panel it now stays lit for about a third of a second after each click. (The control, its id and its behaviour are unchanged.)
 - **Easier to read:** the small grey texts (notes under the knobs, the DARK / unity / THIN marks, the Zone staircase ranges, the DELAY / TICK / RATE labels, the tempo line, the LFO RATE / DEPTH labels, the footer) are larger, and the grey itself is lighter. The note under Repeats is shortened to "ONE ECHO ... INFINITE+" so it fits at the bigger size.
 - Checks on the Linux test computer: engine 159, window 197, all passing. **GitHub's Mac build (run #6, commit 8441fb1, both jobs green):** 159 engine checks, `auval` AU VALIDATION SUCCEEDED, `pluginval` strictness 5 passed for AU and VST3, archs `x86_64 arm64`.
 
-Version 0.3.0 (milestone 3, the styled panel; **not yet tested in Logic**). The window from the approved picture. Still no repeater.
+Version 0.3.0 (milestone 3, the styled panel; **tested in Logic on both Macs on 6 November 2026: worked as described apart from the two things fixed in 0.3.1**). The window from the approved picture. Still no repeater.
 
 - **Styled panel** (`plugin/Source/StyledPanel.*`), after `MimicPhon_panel_mockup_1.png`: title and header, the Zone band (big coloured Zone window,
   the staircase of the eight Zones with their ranges, the delay / tempo box with TICK and RATE lights), five knob cards (Input Level with
@@ -30,7 +45,7 @@ Version 0.3.0 (milestone 3, the styled panel; **not yet tested in Logic**). The 
   the knob card and chip selector, the window-switching pattern.
 - **Checked before hand-over (Linux test computer):** 159 engine checks (31 new) and 197 plugin-side checks (106 new), all passing; pictures drawn at 840, 1200 and 1800 pixels wide
   and compared with the mockup. **GitHub's Mac build (run #4, commit a792619, both jobs green):** 159 engine checks, `auval` AU VALIDATION SUCCEEDED, `pluginval` passed at strictness level 5 for AU and VST3, package archs `x86_64 arm64`.
-- **Not tested in Logic yet.**
+- **Tested in Logic on both Macs (6 November 2026):** as described, apart from Clear showing no sign of being clicked and the small grey text being too small (both fixed in 0.3.1).
 
 Version 0.2.0 (milestone 2, the empty build; **tested in Logic on both Macs on 6 November 2026 and working as described**). The first code. The plugin loads
 and passes the audio through unchanged; there is no repeater yet.
