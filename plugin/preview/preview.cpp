@@ -18,6 +18,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include <mph/core/Color.h>
 
 #include <cmath>
 #include <cstring>
@@ -444,6 +445,19 @@ int main (int argc, char** argv)
             expect (cardText (MphParams::repeats) == "infinite", "Repeats at 0.83 reads \"infinite\"");
             setParameter (p, MphParams::repeats, 1.0f);
             expect (cardText (MphParams::repeats) == "inf +12 %", "Repeats fully right reads \"inf +12 %\" (beyond infinite)");
+            // Color reads the engine's own words, and its teal mark sits on the engine's unity position
+            expect (cardText (MphParams::color) == "clean" && mph::kDefaultColor == mph::core::kColorUnity, "defaults: Color reads \"clean\" (unity, about 3:00)");
+            setParameter (p, MphParams::color, 0.0f);
+            expect (cardText (MphParams::color) == "oil can", "Color fully left reads \"oil can\"");
+            setParameter (p, MphParams::color, 0.4f);
+            expect (cardText (MphParams::color) == "crunch BBD", "Color at 0.4 reads \"crunch BBD\"");
+            setParameter (p, MphParams::color, 0.6f);
+            expect (cardText (MphParams::color) == "tape", "Color at 0.6 reads \"tape\"");
+            setParameter (p, MphParams::color, 1.0f);
+            expect (cardText (MphParams::color) == "thin", "Color fully right reads \"thin\"");
+            setParameter (p, MphParams::color, mph::core::kColorUnity);
+            expect (cardText (MphParams::color) == juce::String (mph::core::colorWord (mph::core::kColorUnity)), "Color on unity reads the engine's word for unity");
+            setParameter (p, MphParams::color, mph::kDefaultColor);
             setParameter (p, MphParams::inputLevel, 1.0f);
             setParameter (p, MphParams::outputLevel, 0.0f);
             expect (cardText (MphParams::inputLevel) == "+6.0 dB" && cardText (MphParams::outputLevel) == "off", "Input Level at the top reads +6.0 dB; Output Level at 0 reads off");

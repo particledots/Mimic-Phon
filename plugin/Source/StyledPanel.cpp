@@ -1,4 +1,5 @@
 #include "StyledPanel.h"
+#include <mph/core/Color.h>
 #include <mph/core/Gain.h>
 #include <mph/core/HostClock.h>
 #include <mph/core/Repeats.h>
@@ -56,16 +57,11 @@ namespace
         return "inf +" + juce::String (juce::roundToInt ((feedback - 1.0f) * 100.0f)) + " %";
     }
 
-    // Color: the words of the manual's description, from the darkest oil-can echo to a thin early digital delay line.
-    // "Unity" (about 3:00) reads "clean".
+    // Color: the words of the manual's description, from the darkest oil-can echo to a thin early digital delay line; the engine's own
+    // function, so the word shown is the sound heard. "Unity" (about 3:00) reads "clean".
     juce::String colorText (double value)
     {
-        if (value < 0.17) return "oil can";
-        if (value < 0.34) return "warm BBD";
-        if (value < 0.50) return "crunch BBD";
-        if (value < 0.67) return "tape";
-        if (value < 0.85) return "clean";
-        return "thin";
+        return mph::core::colorWord ((float) value);
     }
 
     // uRate: plus / minus 12 semitones from the middle position
@@ -387,7 +383,7 @@ MimicPhonStyledPanel::MimicPhonStyledPanel (juce::AudioProcessorValueTreeState& 
         zone.addMark ((double) i / (double) (mph::kNumZones - 1));
 
     auto& color = addKnob (MphParams::color, "COLOR", colorText);
-    color.addMark (5.0 / 6.0, teal);                        // unity, about 3:00
+    color.addMark ((double) mph::core::kColorUnity, teal);   // unity, about 3:00 (the engine's own position)
     color.addNote ("DARK",  { 10, 188, 60, 20 },  juce::Justification::centredLeft,  13.5f, true);
     color.addNote ("unity", { 74, 188, 60, 20 },  juce::Justification::centred,      13.5f, true, teal);
     color.addNote ("THIN",  { 138, 188, 60, 20 }, juce::Justification::centredRight, 13.5f, true);

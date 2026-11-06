@@ -1,9 +1,9 @@
 // The Mimic-Phon engine. Plain C++17, no JUCE, no plugin code.
 //
-// Milestone 4: the core repeater. What works now, and what does not:
+// Milestone 5: the core repeater (milestone 4) plus Color. What works now, and what does not:
 //
-//   Works:   Input Level and the Input Gain step, Zone, Rate, Repeats, Mix, Output Level, Clear.
-//   Not yet: Color (5), Skew / Ping Pong / Swap (6), uRate and its LFO (7), Tempo Sync (8), Halo (9), Flip (10), Hold (11).
+//   Works:   Input Level and the Input Gain step, Zone, Rate, Repeats, Mix, Output Level, Clear, Color.
+//   Not yet: Skew / Ping Pong / Swap (6), uRate and its LFO (7), Tempo Sync (8), Halo (9), Flip (10), Hold (11).
 //            Those controls are read but do nothing; the left and right channels are independent until Skew and Ping Pong.
 //
 // How it sounds, in short: the input is written into one shared stereo buffer (core/DelayBuffer.h, 41.8 s or more) that serves
@@ -16,6 +16,9 @@
 //     pitch effect. Changing Zone again during a crossfade re-aims the incoming read point (a tiny discontinuity, in theory).
 //   * Mix: equal-power balance between the live signal (after Input Level / gain) and the repeats; 0 = all live, 1 = all repeats.
 //   * Clear: everything written so far reads as silence from that moment (all Zones at once, no pause in the audio).
+//   * Color (core/Color.h): a saturation and filter character applied to everything written into the buffer (live signal plus
+//     feedback), so each echo is shaped once more than the last. Left of unity: dark (saturation and a closing low-pass, down to
+//     "oil can"); at unity (about 3:00): nothing, bit for bit; right of unity: thin (a rising high-pass and a little fizz).
 //
 // Window-only things from milestone 3 (never affect the sound): Logic's tempo as last heard, and two counters for the blinking
 // lights: one goes up at every tick of the tempo clock (TICK), the other every time the current delay time has passed (RATE).
@@ -26,6 +29,7 @@
 #include <cmath>
 
 #include "Params.h"
+#include "core/Color.h"
 #include "core/DelayBuffer.h"
 #include "core/HostClock.h"
 #include "core/Repeats.h"
@@ -115,6 +119,13 @@ namespace mph
         float delayCoefficient = 0.0005f;                  // how fast Rate glides (one-pole, about 160 ms)
         float rampCoefficient = 0.002f;                    // how fast the level controls glide (one-pole, about 10 ms)
         Ramp inputGain, outputGain, dryGain, wetGain, feedback;
+
+        // Color (milestone 5): the knob glides (about 30 ms) and the filter's coefficients follow every 16 samples
+        core::ColorFilter colorFilter;
+        Ramp colorKnob;
+        float colorCoefficient = 0.0007f;
+        float colorApplied = -1.0f;                        // the knob value the filter is currently set for
+        int colorCountdown = 0;
 
         // Window-only things (milestone 3)
         core::HostClock clock;

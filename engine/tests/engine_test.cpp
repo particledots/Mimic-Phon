@@ -1,9 +1,11 @@
 // Self-test of the engine (control list, tempo clock, level helpers, the Zone / Rate time map and the counters behind the window's lights;
-// milestone 4 adds the repeater: dry path, levels, Mix, echoes in every Zone, Repeats, saturation, Zone jumps, Rate glide, Clear, tail).
+// milestone 4 adds the repeater: dry path, levels, Mix, echoes in every Zone, Repeats, saturation, Zone jumps, Rate glide, Clear, tail;
+// milestone 5 adds Color: the knob's law, unity bit for bit, dark and thin, each echo shaped once more, stability, no clicks).
 // Prints "engine tests: N checks, F failed" and exits with 0 only if nothing failed.
 
 #include <mph/Engine.h>
 #include <mph/Params.h>
+#include <mph/core/Color.h>
 #include <mph/core/Gain.h>
 #include <mph/core/HostClock.h>
 #include <mph/core/ZoneMap.h>
@@ -947,6 +949,267 @@ namespace
         e.prepare (sr, 512, 2);
         expect (e.getClockTickCount() == 0 && e.getRateTickCount() == 0, "prepare starts the counters again from 0");
     }
+
+    // ---- Color (milestone 5) ----
+    // Simple measures of a stretch of audio: energy of the first difference (weighted to high frequencies) and of a 32-sample
+    // moving average of 128 samples (low frequencies, below about 190 Hz at 48 kHz).
+    double highEnergy (const std::vector<float>& v, int from, int to)
+    {
+        double e = 0.0;
+        for (int i = std::max (1, from); i < to && i < (int) v.size(); ++i)
+        {
+            const double d = (double) v[(size_t) i] - (double) v[(size_t) i - 1];
+            e += d * d;
+        }
+        return e;
+    }
+
+    double lowEnergy (const std::vector<float>& v, int from, int to)
+    {
+        double e = 0.0, sum = 0.0;
+        for (int i = std::max (128, from); i < to && i < (int) v.size(); ++i)
+        {
+            sum = 0.0;
+            for (int k = 0; k < 128; ++k)
+                sum += (double) v[(size_t) (i - k)];
+            e += (sum / 128.0) * (sum / 128.0);
+        }
+        return e;
+    }
+
+    std::vector<float> colourNoise (float color, int zone, double delaySeconds, float repeats, const std::vector<float>& input, int block = 512,
+                                    double sampleRate = 48000.0)
+    {
+        mph::Engine e;
+        e.prepare (sampleRate, block, 2);
+        mph::Params p = repeatsOnly (zone, rateForDelay (zone, delaySeconds), repeats);
+        p.color = color;
+        e.setParams (p);
+        std::vector<float> l = input;
+        processAll (e, l, nullptr, block);
+        return l;
+    }
+
+    void testColor()
+    {
+        // The law
+        {
+            expect (std::strcmp (mph::core::colorWord (mph::kDefaultColor), "clean") == 0, "the starting Color position reads \"clean\"");
+            expect (mph::kDefaultColor == mph::core::kColorUnity, "the starting Color position is unity (about 3:00)");
+            expect (std::strcmp (mph::core::colorWord (0.0f), "oil can") == 0, "Color fully left reads \"oil can\"");
+            expect (std::strcmp (mph::core::colorWord (1.0f), "thin") == 0, "Color fully right reads \"thin\"");
+            expect (std::strcmp (mph::core::colorWord (0.4f), "crunch BBD") == 0 && std::strcmp (mph::core::colorWord (0.25f), "warm BBD") == 0
+                    && std::strcmp (mph::core::colorWord (0.6f), "tape") == 0 && std::strcmp (mph::core::colorWord (0.88f), "crisp") == 0,
+                    "the words in between");
+
+            bool nothingAtUnity = true;
+            for (float c = 0.78f; c <= 0.8201f; c += 0.002f)
+                nothingAtUnity = nothingAtUnity && mph::core::colorShape (c).amount == 0.0f;
+            expect (nothingAtUnity, "Color within 0.02 of unity does nothing at all (amount 0)");
+            expect (mph::core::colorShape (0.7f).amount > 0.0f && mph::core::colorShape (0.9f).amount > 0.0f, "away from unity the effect is there");
+            expect (mph::core::colorShape (0.0f).amount == 1.0f && mph::core::colorShape (1.0f).amount == 1.0f, "fully left and fully right: the full effect");
+
+            const auto left = mph::core::colorShape (0.0f), right = mph::core::colorShape (1.0f);
+            expect (std::fabs (left.lowpassHz - 700.0f) < 1.0f, "fully left: the low-pass is at 700 Hz");
+            expect (std::fabs (right.highpassHz - 1500.0f) < 1.0f, "fully right: the high-pass is at 1.5 kHz");
+            expect (left.highpassHz == 0.0f && right.lowpassHz == 0.0f, "dark has no high-pass, thin has no low-pass");
+
+            bool darkening = true, thinning = true, drivingLeft = true;
+            for (float c = 0.0f; c < 0.77f; c += 0.01f)
+            {
+                const auto a = mph::core::colorShape (c), b = mph::core::colorShape (c + 0.01f);
+                darkening = darkening && a.lowpassHz < b.lowpassHz;              // further left = lower low-pass
+                drivingLeft = drivingLeft && a.drive >= b.drive;
+            }
+            for (float c = 0.83f; c < 0.99f; c += 0.01f)
+                thinning = thinning && mph::core::colorShape (c).highpassHz < mph::core::colorShape (c + 0.01f).highpassHz;
+            expect (darkening, "left of unity: the further left, the lower the low-pass");
+            expect (drivingLeft, "left of unity: the further left, the more saturation");
+            expect (thinning, "right of unity: the further right, the higher the high-pass");
+
+            const auto below = mph::core::colorShape (-5.0f), above = mph::core::colorShape (9.0f);
+            expect (below.lowpassHz == left.lowpassHz && above.highpassHz == right.highpassHz, "a position outside 0..1 is clamped");
+            expect (std::isfinite (mph::core::colorShape (std::nanf ("")).lowpassHz), "not-a-number Color gives a usable shape");
+        }
+
+        std::mt19937 rng (77);
+        std::uniform_real_distribution<float> small (-0.1f, 0.1f);
+        std::vector<float> noise (24000);
+        for (auto& s : noise) s = small (rng);
+
+        // Unity (and a little each side): bit for bit the same as no Color at all, through echoes
+        {
+            const auto reference = colourNoise (0.80f, 2, 0.1, 0.6f, noise);
+            bool same = true;
+            for (float c : { 0.78f, 0.79f, 0.805f, 0.81f, 0.82f })
+                same = same && identical (reference, colourNoise (c, 2, 0.1, 0.6f, noise));
+            expect (same, "Color at and around unity: the sound is exactly the same");
+            expect (! identical (reference, colourNoise (0.7f, 2, 0.1, 0.6f, noise)), "Color away from unity changes the sound");
+        }
+
+        // Dark and thin, measured on one echo of noise (Mix fully right, Repeats fully left, Zone 2 at 100 ms)
+        {
+            const int from = 4800 + 3000, to = (int) noise.size();
+            const auto clean = colourNoise (0.8f, 2, 0.1, 0.0f, noise);
+            const double hClean = highEnergy (clean, from, to), lClean = lowEnergy (clean, from, to);
+
+            const auto dark = colourNoise (0.0f, 2, 0.1, 0.0f, noise);
+            expect (highEnergy (dark, from, to) < 0.05 * hClean, "Color fully left: the highs are mostly gone");
+            expect (lowEnergy (dark, from, to) > 0.25 * lClean && lowEnergy (dark, from, to) < 1.1 * lClean, "Color fully left: the lows are still there");
+
+            const auto thin = colourNoise (1.0f, 2, 0.1, 0.0f, noise);
+            expect (lowEnergy (thin, from, to) < 0.05 * lClean, "Color fully right: the lows are mostly gone");
+            expect (highEnergy (thin, from, to) > 0.7 * hClean, "Color fully right: the highs are kept");
+
+            double previous = 0.0;
+            bool rising = true;
+            for (float c : { 0.0f, 0.15f, 0.3f, 0.45f, 0.6f, 0.75f })
+            {
+                const double h = highEnergy (colourNoise (c, 2, 0.1, 0.0f, noise), from, to);
+                rising = rising && h > previous;
+                previous = h;
+            }
+            expect (rising, "turning Color from the left towards unity: the highs come back steadily");
+
+            // At one echo, Color shapes the echo (the first pass) but the live signal in Mix is untouched
+            mph::Engine e;
+            e.prepare (48000.0, 512, 2);
+            mph::Params p;
+            p.mix = 0.0f;
+            p.color = 0.0f;
+            e.setParams (p);
+            std::vector<float> l = noise;
+            processAll (e, l, nullptr, 512);
+            expect (identical (l, noise), "Mix fully left: Color does not touch the live signal");
+        }
+
+        // Each echo is shaped once more than the one before: with a dark Color the echoes get darker and darker
+        {
+            std::vector<float> burst (9600 * 6, 0.0f);
+            for (int i = 0; i < 1500; ++i) burst[(size_t) i] = small (rng);
+            const auto out = colourNoise (0.3f, 3, 0.2, 0.83f, burst);        // 0.83 = infinite
+            auto ratio = [&] (int echo)
+            {
+                const int a = echo * 9600 + 100, b = echo * 9600 + 1500;
+                return highEnergy (out, a, b) / std::max (1.0e-30, lowEnergy (out, a, b));
+            };
+            expect (ratio (1) > 0.0 && ratio (4) > 0.0, "the echoes are there");
+            expect (ratio (4) < 0.6 * ratio (1), "dark Color: the 4th echo is much darker than the 1st (the shaping builds up)");
+
+            const auto outThin = colourNoise (0.95f, 3, 0.2, 0.83f, burst);
+            auto lowShare = [&] (int echo)
+            {
+                const int a = echo * 9600 + 100, b = echo * 9600 + 1500;
+                return lowEnergy (outThin, a, b) / std::max (1.0e-30, highEnergy (outThin, a, b));
+            };
+            expect (lowShare (4) < 0.6 * lowShare (1), "thin Color: the 4th echo is much thinner than the 1st");
+        }
+
+        // Stable at the extremes: infinite and beyond, loud noise, short and long delays, 20 seconds, all finite and bounded
+        {
+            std::uniform_real_distribution<float> loud (-1.0f, 1.0f);
+            std::vector<float> input (960000);
+            for (auto& s : input) s = loud (rng);
+            bool good = true;
+            float biggest = 0.0f;
+            for (float c : { 0.0f, 0.5f, 0.95f, 1.0f })
+                for (float repeats : { 0.83f, 1.0f })
+                    for (int zone : { 0, 3 })
+                    {
+                        mph::Engine e;
+                        e.prepare (48000.0, 512, 2);
+                        mph::Params p = repeatsOnly (zone, 0.5f, repeats);
+                        p.mix = 0.5f;
+                        p.color = c;
+                        e.setParams (p);
+                        std::vector<float> l = input;
+                        processAll (e, l, nullptr, 512);
+                        for (float s : l)
+                        {
+                            good = good && std::isfinite (s);
+                            biggest = std::max (biggest, std::fabs (s));
+                        }
+                    }
+            expect (good, "Color at the extremes with infinite and beyond: everything stays a real number");
+            expect (biggest < 2.5f, "Color at the extremes with infinite and beyond: the level stays bounded");
+        }
+
+        // Turning Color: no click
+        {
+            mph::Engine e;
+            e.prepare (48000.0, 256, 2);
+            mph::Params p = repeatsOnly (0, 0.0f, 0.0f);
+            p.color = 0.8f;
+            std::vector<float> l (30000);
+            for (size_t i = 0; i < l.size(); ++i)
+                l[i] = 0.3f * (float) std::sin (2.0 * 3.14159265358979 * 200.0 * (double) i / 48000.0);
+            float biggestStep = 0.0f;
+            float last = 0.0f;
+            for (int done = 0; done < 30000; done += 256)
+            {
+                p.color = done < 12000 ? 0.8f : (done < 21000 ? 0.0f : 1.0f);     // jumps: unity -> oil can -> thin
+                e.setParams (p);
+                const int n = std::min (256, 30000 - done);
+                float* chans[2] = { l.data() + done, l.data() + done };
+                e.process (chans, 1, n);
+                for (int i = 0; i < n; ++i)
+                {
+                    if (done + i > 200)
+                        biggestStep = std::max (biggestStep, std::fabs (l[(size_t) (done + i)] - last));
+                    last = l[(size_t) (done + i)];
+                }
+            }
+            expect (biggestStep < 0.03f, "jumping Color from unity to dark to thin: no click (a smooth glide)");
+        }
+
+        // Block size makes no difference; other sample rates stay stable and keep the same character
+        {
+            const auto reference = colourNoise (0.3f, 2, 0.1, 0.5f, noise, 512);
+            bool same = true;
+            for (int block : { 1, 7, 100, 4096 })
+                same = same && identical (reference, colourNoise (0.3f, 2, 0.1, 0.5f, noise, block));
+            expect (same, "Color: the sound does not depend on the block size");
+
+            for (double sr : { 44100.0, 96000.0, 192000.0 })
+            {
+                std::vector<float> in ((size_t) (0.5 * sr));
+                for (auto& s : in) s = small (rng);
+                const int from = (int) (0.2 * sr), to = (int) in.size();
+                const auto clean = colourNoise (0.8f, 2, 0.1, 0.0f, in, 512, sr);
+                const auto dark = colourNoise (0.0f, 2, 0.1, 0.0f, in, 512, sr);
+                const auto thin = colourNoise (1.0f, 2, 0.1, 0.0f, in, 512, sr);
+                // the same corner frequencies in Hertz whatever the sample rate: compare the share of a fixed band, so use the low energy over a
+                // window that is 128 samples at 48 kHz (a proportionally longer one at higher rates)
+                const double hClean = highEnergy (clean, from, to), lClean = lowEnergy (clean, from, to);
+                expect (highEnergy (dark, from, to) < 0.2 * hClean && lowEnergy (thin, from, to) < 0.5 * lClean,
+                        "Color works the same way at 44.1 / 96 / 192 kHz (darker on the left, thinner on the right)");
+            }
+        }
+
+        // Clear empties Color's memory too: nothing rings on after Clear
+        {
+            mph::Engine e;
+            e.prepare (48000.0, 512, 2);
+            mph::Params p = repeatsOnly (1, rateForDelay (1, 0.03), 0.83f);
+            p.color = 0.2f;
+            e.setParams (p);
+            std::vector<float> l (48000);
+            for (auto& s : l) s = small (rng) * 3.0f;
+            processAll (e, l, nullptr, 512);
+            p.clear = true;
+            e.setParams (p);
+            std::vector<float> quiet (512, 0.0f);
+            processAll (e, quiet, nullptr, 512);
+            p.clear = false;
+            e.setParams (p);
+            std::vector<float> after (48000, 0.0f);
+            processAll (e, after, nullptr, 512);
+            float biggest = 0.0f;
+            for (float s : quiet) biggest = std::max (biggest, std::fabs (s));
+            for (float s : after) biggest = std::max (biggest, std::fabs (s));
+            expect (biggest == 0.0f, "Clear with a dark Color: nothing rings on afterwards");
+        }
+    }
 }
 
 int main()
@@ -966,6 +1229,7 @@ int main()
     testGain();
     testZoneMap();
     testLights();
+    testColor();
 
     std::printf ("engine tests: %d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;

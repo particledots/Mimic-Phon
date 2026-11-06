@@ -14,6 +14,8 @@ namespace
     constexpr double kRateGlideSeconds = 0.160;        // Rate: how long the delay time takes to settle (the doppler glide)
     constexpr double kLevelGlideSeconds = 0.010;       // levels, Mix, Repeats: no zipper noise when turned
     constexpr double kZoneFadeSeconds = 0.020;         // Zone jump: crossfade between the old and the new read point
+    constexpr double kColorGlideSeconds = 0.030;       // Color: how fast the knob's effect settles (no clicks when it is turned)
+    constexpr int kColorUpdateSamples = 16;            // how often the Color filter's coefficients follow the knob
     constexpr double kDcBlockerHz = 5.0;
     constexpr float kLevellerCeiling = 0.6f;           // the feedback path is held at this level (clean, instead of distorting)
     constexpr double kLevellerReleaseSeconds = 0.250;  // how slowly it lets go
@@ -45,6 +47,10 @@ void Engine::prepare (double newSampleRate, int newMaxBlockSize, int newNumChann
     delayCoefficient = onePoleCoefficient (kRateGlideSeconds, sampleRate);
     rampCoefficient = onePoleCoefficient (kLevelGlideSeconds, sampleRate);
     fadeStep = (float) (1.0 / std::max (16.0, kZoneFadeSeconds * sampleRate));
+    colorCoefficient = onePoleCoefficient (kColorGlideSeconds, sampleRate);
+    colorFilter.prepare (sampleRate);
+    colorApplied = -1.0f;
+    colorCountdown = 0;
 
     levelRelease = onePoleCoefficient (kLevellerReleaseSeconds, sampleRate);
     envRelease = (float) std::exp (-1.0 / (kLevellerReleaseSeconds * sampleRate));
@@ -93,6 +99,7 @@ void Engine::clearRepeats()
         b.clearAll();
     for (int c = 0; c < 2; ++c)
         dcIn[c] = dcOut[c] = levelEnv[c] = 0.0f, levelGain[c] = 1.0f;
+    colorFilter.reset();
 }
 
 void Engine::process (float* const* channels, int numChannels_, int numSamples)
@@ -142,6 +149,7 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
             fb = 1.0f + (fb - 1.0f) * (float) std::min (1.0, delaySeconds / kBeyondFullDelaySeconds);
         feedback.target = fb;
     }
+    colorKnob.target = (double) std::min (1.0f, std::max (0.0f, params.color));
 
     // The two read points. Rate glides the audible one; a new Zone is a jump, so it goes to the other one and crossfades.
     const double logLive = std::log (delaySeconds);
@@ -152,6 +160,10 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
         dryGain.snap (dryGain.target);
         wetGain.snap (wetGain.target);
         feedback.snap (feedback.target);
+        colorKnob.snap (colorKnob.target);
+        colorApplied = (float) colorKnob.value;
+        colorFilter.setShape (core::colorShape (colorApplied));
+        colorCountdown = kColorUpdateSamples;
         heads[0].logDelay = heads[0].logTarget = logLive;
         heads[1] = heads[0];
         current = 0;
@@ -187,6 +199,16 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
         const float inG = inputGain.next (rampCoefficient), outG = outputGain.next (rampCoefficient);
         const float dryG = dryGain.next (rampCoefficient), wetG = wetGain.next (rampCoefficient);
         const float fbG = feedback.next (rampCoefficient);
+        const float colorNow = colorKnob.next (colorCoefficient);
+        if (--colorCountdown <= 0)
+        {
+            colorCountdown = kColorUpdateSamples;
+            if (colorNow != colorApplied)
+            {
+                colorApplied = colorNow;
+                colorFilter.setShape (core::colorShape (colorNow));
+            }
+        }
 
         Head& hc = heads[current];
         hc.logDelay += (hc.logTarget - hc.logDelay) * (double) delayCoefficient;
@@ -228,7 +250,8 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
             else
                 levelGain[c] += (wanted - levelGain[c]) * levelRelease;
             fed *= levelGain[c];
-            buffers[c].write (x + dsp::softLimit (fed));
+            // What is written: the live signal plus the fed-back repeat, shaped by Color (exactly untouched at unity).
+            buffers[c].write (colorFilter.process (c, x + dsp::softLimit (fed)));
 
             channels[c][n] = (dryG * x + wetG * wet) * outG;
         }
