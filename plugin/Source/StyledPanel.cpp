@@ -3,6 +3,7 @@
 #include <mph/core/Gain.h>
 #include <mph/core/HostClock.h>
 #include <mph/core/Repeats.h>
+#include <mph/core/URate.h>
 #include <mph/core/ZoneMap.h>
 #include <cmath>
 
@@ -64,22 +65,41 @@ namespace
         return mph::core::colorWord ((float) value);
     }
 
-    // uRate: plus / minus 12 semitones from the middle position
-    juce::String uRateText (double value)
+    // uRate: what the knob does in the current Zone, from the engine's own rules (core/URate.h). Zone 0: pitch, in semitones (one volt
+    // per octave, for Karplus-style tones). Zones 1-7: how much shorter or longer the delay is made (doppler when it moves).
+    juce::String uRateText (double value, int zone)
     {
-        const double semitones = (value - 0.5) * 24.0;
-        const juce::String sign = semitones > 0.05 ? "+" : "";
-        return sign + juce::String (semitones, 1) + " st";
+        const double u = mph::core::uRateBipolar ((float) value);
+        if (zone == 0)
+        {
+            const double semitones = u * mph::core::kURateKnobMaxSemitones;
+            return juce::String (semitones > 0.05 ? "+" : "") + juce::String (semitones, 1) + " st";
+        }
+        const double ms = std::fabs (u) * mph::core::kURateKnobMaxSeconds * 1000.0;
+        if (u == 0.0)
+            return "0.0 ms";
+        return juce::String (ms, 1) + (u > 0.0 ? " ms shorter" : " ms longer");
     }
 
-    constexpr double kLfoMinHz = 0.1, kLfoMaxHz = 20.0;
-
+    // The LFO's Rate: Hz, or with Sync the note division (the Clock Division menu's own names: "1/4", "1/8T", "2 bars" ...)
     juce::String lfoRateText (double value, bool synced)
     {
         if (synced)
-            return "synced";
-        const double hz = kLfoMinHz * std::pow (kLfoMaxHz / kLfoMinHz, value);
+            return mph::core::lfoSyncName ((float) value);
+        const double hz = mph::core::lfoFreeHz ((float) value);
         return juce::String (hz, hz < 10.0 ? 2 : 1) + " Hz";
+    }
+
+    // The LFO's Depth: the peak swing that is heard, in the current Zone's own unit (milliseconds of delay, or semitones in Zone 0)
+    juce::String lfoDepthText (float depth, int zone, double hz)
+    {
+        if (depth <= 0.0f)
+            return "off";
+        const juce::String plusMinus = juce::String::fromUTF8 ("\xc2\xb1");
+        if (zone == 0)
+            return plusMinus + juce::String (mph::core::lfoPeakSemitones (depth), 1) + " st";
+        const double ms = mph::core::lfoPeakSeconds (depth, hz) * 1000.0;
+        return plusMinus + juce::String (ms, ms < 10.0 ? 1 : 0) + " ms";
     }
 
     // A delay time: "1.3 ms", "81.6 ms", "653 ms", "1.31 s", "12.5 s"
@@ -301,8 +321,8 @@ void KnobCard::paint (juce::Graphics& g)
 }
 
 //==============================================================================
-LfoCard::LfoCard (juce::AudioProcessorValueTreeState& s)
-    : state (s), shape (s, MphParams::uRateLfoShape, { "SINE", "TRI" })
+LfoCard::LfoCard (juce::AudioProcessorValueTreeState& s, const mph::Engine& e)
+    : state (s), engine (e), shape (s, MphParams::uRateLfoShape, { "SINE", "TRI" })
 {
     for (auto* knob : { &rate, &depth })
     {
@@ -323,6 +343,18 @@ LfoCard::LfoCard (juce::AudioProcessorValueTreeState& s)
     sync.onStateChange = [this] { repaint(); };
     addAndMakeVisible (sync);
     syncAttachment = std::make_unique<ButtonAttachment> (state, MphParams::uRateLfoSync, sync);
+}
+
+juce::String LfoCard::rateReadout() const
+{
+    return lfoRateText (rate.getValue(), sync.getToggleState());
+}
+
+juce::String LfoCard::depthReadout() const
+{
+    const int zone = juce::jlimit (0, mph::kNumZones - 1, (int) std::lround (state.getRawParameterValue (MphParams::zone)->load()));
+    const double hz = mph::core::lfoHz ((float) rate.getValue(), sync.getToggleState(), (double) engine.getHostBpm(), (double) engine.getHostBeatsPerBar());
+    return lfoDepthText ((float) depth.getValue(), zone, hz);
 }
 
 void LfoCard::resized()
@@ -353,8 +385,8 @@ void LfoCard::paint (juce::Graphics& g)
 
     g.setColour (amber);
     g.setFont (mono (15.0f));
-    g.drawText (lfoRateText (rate.getValue(), sync.getToggleState()), juce::Rectangle<int> (6, 155, 96, 22), juce::Justification::centred, false);
-    g.drawText (percentText (depth.getValue()), juce::Rectangle<int> (106, 155, 96, 22), juce::Justification::centred, false);
+    g.drawText (rateReadout(),  juce::Rectangle<int> (6, 155, 96, 22), juce::Justification::centred, false);
+    g.drawText (depthReadout(), juce::Rectangle<int> (106, 155, 96, 22), juce::Justification::centred, false);
 }
 
 //==============================================================================
@@ -393,11 +425,16 @@ MimicPhonStyledPanel::MimicPhonStyledPanel (juce::AudioProcessorValueTreeState& 
     rate.addNote ("with Skew on: pulls L and R apart", { 6, 186, 196, 24 }, juce::Justification::centred, 13.5f);
     rateCard = &rate;
 
-    auto& uRate = addKnob (MphParams::uRate, muRate ("RATE"), uRateText);
+    auto& uRate = addKnob (MphParams::uRate, muRate ("RATE"), [this] (double value)
+    {
+        const int zone = juce::jlimit (0, mph::kNumZones - 1, (int) std::lround (state.getRawParameterValue (MphParams::zone)->load()));
+        return uRateText (value, zone);
+    });
     uRate.addMark (0.5);
     uRate.addNote ("doppler: chorus / vibrato / flange", { 6, 186, 196, 24 }, juce::Justification::centred, 13.5f);
+    uRateCard = &uRate;
 
-    lfoCard = std::make_unique<LfoCard> (state);
+    lfoCard = std::make_unique<LfoCard> (state, engine);
     addAndMakeVisible (*lfoCard);
     controlIds.push_back (MphParams::uRateLfoRate);
     controlIds.push_back (MphParams::uRateLfoDepth);
@@ -506,8 +543,12 @@ MimicPhonStyledPanel::Readout MimicPhonStyledPanel::getReadout() const
         rateRight = sides.right;
     }
     const double hop = mode == mph::core::PingMode::pingPong ? mph::core::kPingPongHop : 1.0;     // Ping Pong: each bounce is half the time
-    r.delayLeft = delayText (currentDelaySeconds (rateLeft) * hop);
-    r.delayRight = delayText (currentDelaySeconds (rateRight) * hop);
+    // uRate's steady offset is in the delay that is heard (Zones 1-7: seconds, opposite on the right when Skew has split the sides;
+    // Zone 0: pitch). The LFO swings around this and is not in the read-out.
+    const float uRateKnob = get (MphParams::uRate);
+    const bool splitSides = stereo && skewState.skewed;
+    r.delayLeft = delayText (mph::core::uRateStaticDelay (r.zone, currentDelaySeconds (rateLeft) * hop, uRateKnob, 0, splitSides));
+    r.delayRight = delayText (mph::core::uRateStaticDelay (r.zone, currentDelaySeconds (rateRight) * hop, uRateKnob, 1, splitSides));
 
     const float bpm = engine.getHostBpm();
     r.tempo = bpm > 0.0f ? "TEMPO " + juce::String (bpm, 1) + " BPM" : juce::String ("TEMPO 120.0 (assumed)");
@@ -583,6 +624,8 @@ void MimicPhonStyledPanel::timerCallback()
         bandChanged = true;
         if (rateCard != nullptr)
             rateCard->repaint();
+        if (uRateCard != nullptr)
+            uRateCard->repaint();           // its read-out depends on the Zone
         if (lfoCard != nullptr)
             lfoCard->repaint();
     }

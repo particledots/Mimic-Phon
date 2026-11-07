@@ -117,16 +117,22 @@ private:
 class LfoCard : public juce::Component
 {
 public:
-    explicit LfoCard (juce::AudioProcessorValueTreeState&);
+    // "engine" is only looked at: Logic's tempo (the synced speed, and so the held-back swing at fast speeds, depend on it).
+    LfoCard (juce::AudioProcessorValueTreeState&, const mph::Engine& engine);
 
     void paint (juce::Graphics&) override;
     void resized() override;
+
+    // What the card shows under its two small knobs (the same functions as the sound; also used by the automatic checks).
+    juce::String rateReadout() const;
+    juce::String depthReadout() const;
 
 private:
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
     using ButtonAttachment = juce::AudioProcessorValueTreeState::ButtonAttachment;
 
     juce::AudioProcessorValueTreeState& state;
+    const mph::Engine& engine;
     juce::Slider rate, depth;
     ChipSelector shape;
     juce::TextButton sync { "SYNC" };
@@ -155,6 +161,7 @@ public:
 
     // The ids of all parameters that have a control in this window (used by the check that none is missing).
     const std::vector<juce::String>& controlledParameterIds() const { return controlIds; }
+    const LfoCard* getLfoCard() const { return lfoCard.get(); }
 
     // What the Zone band and the Rate knob show right now (also used by the automatic checks).
     struct Readout
@@ -202,6 +209,7 @@ private:
     std::vector<std::unique_ptr<KnobCard>> cards;
     KnobCard* rateCard = nullptr;
     std::unique_ptr<ChipSelector> gainChips;
+    KnobCard* uRateCard = nullptr;
     std::unique_ptr<LfoCard> lfoCard;
     std::vector<std::unique_ptr<ButtonItem>> buttons;
     juce::ComboBox clockBox;

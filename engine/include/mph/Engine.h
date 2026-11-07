@@ -1,9 +1,10 @@
 // The Mimic-Phon engine. Plain C++17, no JUCE, no plugin code.
 //
-// Milestone 6: the core repeater (milestone 4), Color (5) and Skew, Ping Pong and Swap. What works now, and what does not:
+// Milestone 7: the core repeater (milestone 4), Color (5), Skew, Ping Pong and Swap (6), and uRate with its LFO. What works now, and what does not:
 //
-//   Works:   Input Level and the Input Gain step, Zone, Rate, Repeats, Mix, Output Level, Clear, Color, Skew, Ping Pong / Swap.
-//   Not yet: uRate and its LFO (7), Tempo Sync (8), Halo (9), Flip (10), Hold (11).
+//   Works:   Input Level and the Input Gain step, Zone, Rate, Repeats, Mix, Output Level, Clear, Color, Skew, Ping Pong / Swap,
+//            uRate and the uRate LFO (Rate, Depth, Sine / Triangle, Sync to Logic's tempo).
+//   Not yet: Tempo Sync of Rate (8), Halo (9), Flip (10), Hold (11).
 //            Those controls are read but do nothing.
 //
 // How it sounds, in short: the input is written into one shared stereo buffer (core/DelayBuffer.h, 41.8 s or more) that serves
@@ -24,6 +25,11 @@
 //   * Ping Pong (button on, sides not skewed): the inputs are summed to mono into the left side only, the feedback of each side goes
 //     into the other, and each hop is half the delay time, so the repeats bounce left, right, left ... Swap (button on, sides
 //     skewed): the left and right feedback paths are swapped, inputs stay stereo, times stay as Skew set them.
+//   * uRate (core/URate.h): a doppler-only offset on the read points, added AFTER Rate's own glide so it is quick: a steady offset of up
+//     to 6 ms either way in Zones 1-7 (clockwise = shorter delay = pitch up), one octave either way in Zone 0 (1 V/oct, Karplus pitch).
+//     The LFO swings around it (0.1 - 20 Hz, or a note division with Sync, locked to Logic's song position while it plays); its Depth is on
+//     a squared curve, shallow at first and very deep at the far end. With sides split by Skew the right side is opposite in Zones 1-7
+//     (stereo chorus); Zone 0 ignores Skew. With uRate at the middle and Depth at zero nothing is touched, bit for bit.
 //
 // Window-only things from milestone 3 (never affect the sound): Logic's tempo as last heard, and two counters for the blinking
 // lights: one goes up at every tick of the tempo clock (TICK), the other every time the current delay time has passed (RATE).
@@ -39,6 +45,7 @@
 #include "core/HostClock.h"
 #include "core/Repeats.h"
 #include "core/Skew.h"
+#include "core/URate.h"
 #include "core/ZoneMap.h"
 
 namespace mph
@@ -147,6 +154,17 @@ namespace mph
         core::SkewState skew;
         Ramp crossing, monoSum;                            // 1 = feedback paths crossed (Ping Pong / Swap); 1 = inputs summed into the left side (Ping Pong)
         double ratePhaseRight = 0.0;                       // the RATE light follows both sides when they differ
+
+        // uRate and its LFO (milestone 7). Each read point remembers the Zone it was aimed at (the knob means pitch in Zone 0, time in
+        // the others), so a Zone jump does not change how the old read point is modulated while it fades out.
+        int headZone[2] = { kDefaultZone, kDefaultZone };  // [which read point]
+        Ramp uRateKnob;                                    // the knob as -1..+1 (core::uRateBipolar), glides about 10 ms
+        Ramp lfoSeconds, lfoSemitones;                     // the LFO's peak swing (Zones 1-7 in seconds, Zone 0 in semitones)
+        Ramp rightSide;                                    // +1, or -1 for the right side when Skew has split the sides (Zones 1-7)
+        double lfoPhase = 0.0;                             // 0..1
+        double lfoStep = 0.0;                              // phase added per sample
+        double lfoSmoothed = 0.0;                          // the LFO's output, smoothed by about 2 ms (a jump of phase makes no click)
+        double lfoSmoothCoefficient = 0.01;
 
         // Color (milestone 5): the knob glides (about 30 ms) and the filter's coefficients follow every 16 samples
         core::ColorFilter colorFilter;

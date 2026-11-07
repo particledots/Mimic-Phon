@@ -14,6 +14,7 @@ namespace
     constexpr double kRateGlideSeconds = 0.160;        // Rate: how long the delay time takes to settle (the doppler glide)
     constexpr double kLevelGlideSeconds = 0.010;       // levels, Mix, Repeats: no zipper noise when turned
     constexpr double kZoneFadeSeconds = 0.020;         // Zone jump: crossfade between the old and the new read point
+    constexpr double kLfoSmoothSeconds = 0.002;        // uRate LFO: its output is smoothed a little, so a jump of phase makes no click
     constexpr double kColorGlideSeconds = 0.030;       // Color: how fast the knob's effect settles (no clicks when it is turned)
     constexpr int kColorUpdateSamples = 16;            // how often the Color filter's coefficients follow the knob
     constexpr double kDcBlockerHz = 5.0;
@@ -48,6 +49,11 @@ void Engine::prepare (double newSampleRate, int newMaxBlockSize, int newNumChann
     rampCoefficient = onePoleCoefficient (kLevelGlideSeconds, sampleRate);
     fadeStep = (float) (1.0 / std::max (16.0, kZoneFadeSeconds * sampleRate));
     colorCoefficient = onePoleCoefficient (kColorGlideSeconds, sampleRate);
+    lfoSmoothCoefficient = 1.0 - std::exp (-1.0 / (kLfoSmoothSeconds * sampleRate));
+    lfoPhase = 0.0;
+    lfoStep = 0.0;
+    lfoSmoothed = 0.0;
+    headZone[0] = headZone[1] = kDefaultZone;
     colorFilter.prepare (sampleRate);
     colorApplied = -1.0f;
     colorCountdown = 0;
@@ -210,6 +216,24 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
     }
     colorKnob.target = (double) std::min (1.0f, std::max (0.0f, params.color));
 
+    // uRate and its LFO: the knob and the LFO's swing glide (about 10 ms); the LFO runs free (Hz) or in note divisions of Logic's tempo.
+    {
+        const double bpm = host.tempoValid ? host.bpm : 120.0;
+        const double hz = core::lfoHz (params.uRateLfoRate, params.uRateLfoSync, bpm, host.beatsPerBar);
+        uRateKnob.target = core::uRateBipolar (params.uRate);
+        lfoSeconds.target = core::lfoPeakSeconds (params.uRateLfoDepth, hz);
+        lfoSemitones.target = core::lfoPeakSemitones (params.uRateLfoDepth);
+        rightSide.target = (stereoRouting && skew.skewed) ? -1.0 : 1.0;
+        lfoStep = std::min (0.45, hz / sampleRate);
+        if (params.uRateLfoSync && host.playing && host.ppqValid && std::isfinite (host.ppq))
+        {
+            // Locked to the song: the phase is where the song position puts it (so it lines up after a jump or a loop too).
+            const double cycle = core::lfoCycleBeats (params.uRateLfoRate, host.beatsPerBar);
+            const double position = host.ppq / cycle;
+            lfoPhase = position - std::floor (position);
+        }
+    }
+
     // The read points: one pair per side. Rate glides the audible one; a jump (a new Zone, the Ping Pong hop switching on or off, or a
     // Skew button press that moves the times) goes to the other one of the pair and crossfades.
     const double logLive[2] = { std::log (sides.left), std::log (sides.right) };
@@ -224,6 +248,11 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
         crossing.snap (crossing.target);
         monoSum.snap (monoSum.target);
         colorKnob.snap (colorKnob.target);
+        uRateKnob.snap (uRateKnob.target);
+        lfoSeconds.snap (lfoSeconds.target);
+        lfoSemitones.snap (lfoSemitones.target);
+        rightSide.snap (rightSide.target);
+        headZone[0] = headZone[1] = params.zone;
         colorApplied = (float) colorKnob.value;
         colorFilter.setShape (core::colorShape (colorApplied));
         colorCountdown = kColorUpdateSamples;
@@ -247,6 +276,7 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
             Head& incoming = heads[c][1 - current];
             incoming.logDelay = incoming.logTarget = logLive[c];       // the new time, at once (no glide, so no pitch effect)
         }
+        headZone[1 - current] = params.zone;                           // the new read point is modulated the way the new Zone says
         if (! fading)
         {
             fading = true;
@@ -286,19 +316,40 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
 
         const float crossG = crossing.next (rampCoefficient), monoG = monoSum.next (rampCoefficient);
 
+        // uRate and its LFO: one offset for the sample, added to each read point's own (glided) time below
+        uRateKnob.next (rampCoefficient);
+        lfoSeconds.next (rampCoefficient);
+        lfoSemitones.next (rampCoefficient);
+        rightSide.next (delayCoefficient);
+        lfoPhase += lfoStep;
+        if (lfoPhase >= 1.0)
+            lfoPhase -= std::floor (lfoPhase);
+        lfoSmoothed += (core::lfoValue (params.uRateLfoShape, lfoPhase) - lfoSmoothed) * lfoSmoothCoefficient;
+        const double knobNow = uRateKnob.value;
+        const bool modulating = knobNow != 0.0 || lfoSeconds.value != 0.0 || lfoSemitones.value != 0.0;
+        auto modulated = [&] (int zone, double seconds, int channel)
+        {
+            if (! modulating)
+                return seconds;                                        // nothing at all is changed: bit for bit as before milestone 7
+            if (zone == 0)
+                return seconds * std::exp2 (-(knobNow * core::kURateKnobMaxSemitones + lfoSmoothed * lfoSemitones.value) / 12.0);
+            const double side = channel == 1 ? rightSide.value : 1.0;
+            return seconds - side * (knobNow * core::kURateKnobMaxSeconds + lfoSmoothed * lfoSeconds.value);
+        };
+
         // Each side's read point(s)
         double delayCurrent[2] = { minDelay, minDelay }, delayIncoming[2] = { minDelay, minDelay };
         for (int c = 0; c < channelCount; ++c)
         {
             Head& hc = heads[c][current];
             hc.logDelay += (hc.logTarget - hc.logDelay) * (double) delayCoefficient;
-            delayCurrent[c] = std::min (maxDelay, std::max (minDelay, std::exp (hc.logDelay) * sampleRate));
+            delayCurrent[c] = std::min (maxDelay, std::max (minDelay, modulated (headZone[current], std::exp (hc.logDelay), c) * sampleRate));
             delayIncoming[c] = delayCurrent[c];
             if (fading)
             {
                 Head& hi = heads[c][1 - current];
                 hi.logDelay += (hi.logTarget - hi.logDelay) * (double) delayCoefficient;
-                delayIncoming[c] = std::min (maxDelay, std::max (minDelay, std::exp (hi.logDelay) * sampleRate));
+                delayIncoming[c] = std::min (maxDelay, std::max (minDelay, modulated (headZone[1 - current], std::exp (hi.logDelay), c) * sampleRate));
             }
         }
 

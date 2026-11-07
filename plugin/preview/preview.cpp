@@ -711,8 +711,158 @@ int main (int argc, char** argv)
             }
         }
 
+        // ---- uRate and its LFO (milestone 7): the read-outs say what the sound does ----
+        {
+            const juce::String plusMinus = juce::String::fromUTF8 ("\xc2\xb1");
+            MimicPhonProcessor p;
+            fresh (p);
+            MimicPhonEditor editor (p);
+            editor.setSize (1200, 800);
+            auto* panel = editor.getStyledPanel();
+            if (panel != nullptr)
+            {
+                std::vector<KnobCard*> knobCards;
+                collect (*panel, knobCards);
+                auto cardText = [&] (const char* id) -> juce::String
+                {
+                    for (auto* card : knobCards)
+                        if (juce::String (card->getParameterId()) == id)
+                            return card->getReadoutText();
+                    return "(no such card)";
+                };
+                const auto* lfo = panel->getLfoCard();
+                expect (lfo != nullptr, "the styled panel has the uRate LFO card");
+                if (lfo != nullptr)
+                {
+                    // defaults: Zone 4, uRate in the middle, LFO depth at zero
+                    expect (cardText (MphParams::uRate) == "0.0 ms", "defaults: uRate reads 0.0 ms in Zones 1-7");
+                    expect (lfo->rateReadout() == "0.49 Hz" && lfo->depthReadout() == "off", "defaults: LFO Rate 0.49 Hz, Depth off");
+
+                    setParameter (p, MphParams::uRate, 1.0f);
+                    expect (cardText (MphParams::uRate) == "6.0 ms shorter", "uRate fully clockwise, Zone 4: 6.0 ms shorter");
+                    setParameter (p, MphParams::uRate, 0.0f);
+                    expect (cardText (MphParams::uRate) == "6.0 ms longer", "uRate fully counter-clockwise, Zone 4: 6.0 ms longer");
+                    setParameter (p, MphParams::zone, 0.0f);
+                    expect (cardText (MphParams::uRate) == "-12.0 st", "Zone 0: uRate fully counter-clockwise reads -12.0 st (pitch)");
+                    setParameter (p, MphParams::uRate, 1.0f);
+                    expect (cardText (MphParams::uRate) == "+12.0 st", "Zone 0: uRate fully clockwise reads +12.0 st");
+                    setParameter (p, MphParams::uRate, 0.5f);
+                    expect (cardText (MphParams::uRate) == "0.0 st", "Zone 0: uRate in the middle reads 0.0 st");
+                    setParameter (p, MphParams::zone, 4.0f / 7.0f);
+
+                    // LFO Depth: the peak swing that is heard, in the Zone's own unit
+                    setParameter (p, MphParams::uRateLfoDepth, 1.0f);
+                    expect (lfo->depthReadout() == plusMinus + "12 ms", "LFO Depth full, Zone 4, 0.49 Hz: +-12 ms");
+                    setParameter (p, MphParams::uRateLfoDepth, 0.5f);
+                    expect (lfo->depthReadout() == plusMinus + "3.0 ms", "LFO Depth half: +-3.0 ms (squared curve)");
+                    setParameter (p, MphParams::uRateLfoDepth, 1.0f);
+                    setParameter (p, MphParams::uRateLfoRate, 1.0f);
+                    expect (lfo->rateReadout() == "20.0 Hz" && lfo->depthReadout() == plusMinus + "4.8 ms", "LFO at 20 Hz: the swing is held back (+-4.8 ms)");
+                    setParameter (p, MphParams::zone, 0.0f);
+                    setParameter (p, MphParams::uRateLfoDepth, 0.5f);
+                    expect (lfo->depthReadout() == plusMinus + "3.0 st", "LFO Depth half in Zone 0: +-3.0 st");
+                    setParameter (p, MphParams::zone, 4.0f / 7.0f);
+
+                    // Sync: the Rate knob names a note division
+                    setParameter (p, MphParams::uRateLfoSync, 1.0f);
+                    setParameter (p, MphParams::uRateLfoRate, 0.35f);
+                    expect (lfo->rateReadout() == "1/4", "LFO Sync: Rate at 0.35 reads 1/4");
+                    setParameter (p, MphParams::uRateLfoRate, 1.0f);
+                    expect (lfo->rateReadout() == "1/32", "LFO Sync: Rate fully right reads 1/32");
+                    setParameter (p, MphParams::uRateLfoRate, 0.0f);
+                    expect (lfo->rateReadout() == "2 bars", "LFO Sync: Rate fully left reads 2 bars");
+                    setParameter (p, MphParams::uRateLfoSync, 0.0f);
+                }
+                resetAll (p);
+                setParameter (p, MphParams::mix, 1.0f);
+                setParameter (p, MphParams::repeats, 0.0f);
+            }
+
+            // The Delay box and the echoes heard: uRate's steady offset is in both (the LFO is not)
+            for (int zoneIndex : { 4, 2, 0 })
+            {
+                MimicPhonProcessor q;
+                fresh (q);
+                setParameter (q, MphParams::zone, (float) zoneIndex / 7.0f);
+                setParameter (q, MphParams::rate, zoneIndex == 0 ? 0.6f : 0.5f);
+                setParameter (q, MphParams::uRate, 1.0f);
+                processSeconds (q, 0.1, 480);
+                MimicPhonEditor win (q);
+                win.setSize (1200, 800);
+                auto* pn = win.getStyledPanel();
+                if (pn != nullptr)
+                {
+                    pn->refreshNow();
+                    const auto r = pn->getReadout();
+                    MimicPhonProcessor heard;
+                    fresh (heard);
+                    setParameter (heard, MphParams::zone, (float) zoneIndex / 7.0f);
+                    setParameter (heard, MphParams::rate, zoneIndex == 0 ? 0.6f : 0.5f);
+                    setParameter (heard, MphParams::uRate, 1.0f);
+                    double left = -1, right = -1;
+                    echoTimes (heard, left, right);
+                    const double shown = seconds (r.delayLeft);
+                    expect (std::abs (left - shown) < (zoneIndex == 0 ? 0.0004 : 0.003) && std::abs (right - shown) < (zoneIndex == 0 ? 0.0004 : 0.003),
+                            zoneIndex == 0 ? "uRate in Zone 0: the echo heard matches the Delay read-out (pitch)"
+                                           : "uRate in Zones 1-7: the echo heard matches the Delay read-out");
+                }
+            }
+
+            // With Skew splitting the sides, Zones 1-7: the right side is opposite, in the read-out and in the sound
+            {
+                MimicPhonProcessor q;
+                fresh (q);
+                setParameter (q, MphParams::skew, 1.0f);
+                processSeconds (q, 0.1, 480);
+                setParameter (q, MphParams::rate, 0.8f);
+                setParameter (q, MphParams::uRate, 1.0f);
+                processSeconds (q, 1.5, 480);
+                MimicPhonEditor win (q);
+                win.setSize (1200, 800);
+                auto* pn = win.getStyledPanel();
+                if (pn != nullptr)
+                {
+                    pn->refreshNow();
+                    const auto r = pn->getReadout();
+                    MimicPhonProcessor heard;
+                    fresh (heard);
+                    setParameter (heard, MphParams::skew, 1.0f);
+                    processSeconds (heard, 0.1, 480);
+                    setParameter (heard, MphParams::rate, 0.8f);
+                    setParameter (heard, MphParams::uRate, 1.0f);
+                    processSeconds (heard, 1.5, 480);
+                    double left = -1, right = -1;
+                    echoTimes (heard, left, right);
+                    expect (std::abs (left - seconds (r.delayLeft)) < 0.003 && std::abs (right - seconds (r.delayRight)) < 0.003,
+                            "uRate with Skew: the echoes heard on L and R match the Delay read-out");
+                    expect (r.delayLeft == "425 ms" && r.delayRight == "996 ms", "uRate fully clockwise with Skew at Rate 0.8 in Zone 4: L 425 ms (6 ms shorter), R 996 ms (6 ms longer)");
+                }
+            }
+        }
+
         // The plain window carries the same buttons and controls (nothing was added or removed)
         expect (proc.getParameters().size() == 21, "still 21 parameters: no control id was added or removed");
+    }
+
+    // ---------------- a picture with uRate and the LFO working in Zone 0 (its own plugin object) ----------------
+    {
+        MimicPhonProcessor lfoProc;
+        lfoProc.setPlayConfigDetails (2, 2, 48000.0, 512);
+        lfoProc.prepareToPlay (48000.0, 512);
+        resetAll (lfoProc);
+        MimicPhonEditor lfoEditor (lfoProc);
+        lfoEditor.showView (MimicPhonEditor::View::styled);
+        lfoEditor.setSize (1200, 800);
+        setParameter (lfoProc, MphParams::zone, 1.0f / 7.0f);
+        setParameter (lfoProc, MphParams::skew, 1.0f);
+        processSeconds (lfoProc, 0.1, 480);
+        setParameter (lfoProc, MphParams::rate, 0.62f);
+        setParameter (lfoProc, MphParams::uRate, 0.68f);
+        setParameter (lfoProc, MphParams::uRateLfoRate, 0.4f);
+        setParameter (lfoProc, MphParams::uRateLfoDepth, 0.6f);
+        processSeconds (lfoProc, 0.3, 480);
+        letWindowThreadRun (150);
+        save (lfoEditor, outDir.getChildFile ("styled_panel_urate.png"), 1.0f);
     }
 
     // ---------------- a picture with Skew pulling L and R apart and Swap on (its own plugin object: the audio has to run for the engine to know) ----------------

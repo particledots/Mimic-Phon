@@ -1,7 +1,8 @@
 // Self-test of the engine (control list, tempo clock, level helpers, the Zone / Rate time map and the counters behind the window's lights;
 // milestone 4 adds the repeater: dry path, levels, Mix, echoes in every Zone, Repeats, saturation, Zone jumps, Rate glide, Clear, tail;
 // milestone 5 adds Color: the knob's law, unity bit for bit, dark and thin, each echo shaped once more, stability, no clicks;
-// milestone 6 adds Skew, Ping Pong and Swap: the rules, the echo times heard on each side, the routing, stability, no clicks).
+// milestone 6 adds Skew, Ping Pong and Swap: the rules, the echo times heard on each side, the routing, stability, no clicks;
+// milestone 7 adds uRate and its LFO: the rules, the steady offset in every Zone, the LFO's swing and speed, the sync lock, stereo opposite, stability).
 // Prints "engine tests: N checks, F failed" and exits with 0 only if nothing failed.
 
 #include <mph/Engine.h>
@@ -10,6 +11,7 @@
 #include <mph/core/Gain.h>
 #include <mph/core/HostClock.h>
 #include <mph/core/Skew.h>
+#include <mph/core/URate.h>
 #include <mph/core/ZoneMap.h>
 
 #include <cmath>
@@ -1703,6 +1705,323 @@ namespace
             expect (blinks (true) > blinks (false), "the RATE light blinks for both sides when Skew splits them");
         }
     }
+    // ---- milestone 7: uRate and its LFO ----
+
+    // A slow ramp goes in on both sides (Mix fully right, one echo), so what comes out says exactly how long the delay was at every
+    // moment: delay (samples) = n - out / step. A cubic read of a straight line is exact, so this measures the engine itself.
+    struct Trace { std::vector<double> l, r; };
+    constexpr double kRampStep = 5.0e-6;
+    Trace delayTrace (mph::Params p, int samples, bool playing = false, double ppqStart = 0.0, double bpm = 120.0, int from = 48000)
+    {
+        mph::Engine e;
+        e.prepare (48000.0, 512, 2);
+        std::vector<float> l ((size_t) samples), r ((size_t) samples);
+        for (int i = 0; i < samples; ++i)
+            l[(size_t) i] = r[(size_t) i] = (float) (i * kRampStep);
+        std::vector<float> outL = l, outR = r;
+        double ppq = ppqStart;
+        for (int done = 0; done < samples; done += 512)
+        {
+            const int n = std::min (512, samples - done);
+            mph::core::HostInfo host;
+            host.tempoValid = true; host.bpm = bpm; host.playing = playing; host.ppqValid = true; host.ppq = ppq;
+            e.setParams (p);
+            e.setHost (host);
+            float* chans[2] = { outL.data() + done, outR.data() + done };
+            e.process (chans, 2, n);
+            ppq += n * bpm / 60.0 / 48000.0;
+        }
+        Trace t;
+        for (int i = from; i < samples; ++i)
+        {
+            t.l.push_back (i - outL[(size_t) i] / kRampStep);
+            t.r.push_back (i - outR[(size_t) i] / kRampStep);
+        }
+        return t;
+    }
+    double lowest (const std::vector<double>& v) { double m = 1.0e30; for (double x : v) m = std::min (m, x); return m; }
+    double highest (const std::vector<double>& v) { double m = -1.0e30; for (double x : v) m = std::max (m, x); return m; }
+    double meanOf (const std::vector<double>& v) { double s = 0.0; for (double x : v) s += x; return v.empty() ? 0.0 : s / (double) v.size(); }
+    double together (const std::vector<double>& a, const std::vector<double>& b)      // > 0: the two swing the same way
+    {
+        const double ma = meanOf (a), mb = meanOf (b);
+        double s = 0.0;
+        for (size_t i = 0; i < a.size() && i < b.size(); ++i) s += (a[i] - ma) * (b[i] - mb);
+        return s;
+    }
+
+    void testURateRules()
+    {
+        using namespace mph::core;
+        expect (uRateBipolar (0.5f) == 0.0 && uRateBipolar (0.504f) == 0.0 && uRateBipolar (0.496f) == 0.0, "uRate: exactly zero around the middle");
+        expect (std::fabs (uRateBipolar (1.0f) - 1.0) < 1.0e-9 && std::fabs (uRateBipolar (0.0f) + 1.0) < 1.0e-9, "uRate: the far ends are -1 and +1");
+        bool rising = true;
+        for (int i = 1; i <= 100; ++i)
+            rising = rising && uRateBipolar ((float) i / 100.0f) >= uRateBipolar ((float) (i - 1) / 100.0f);
+        expect (rising, "uRate: turning clockwise never goes down");
+        expect (uRateStaticDelay (2, 0.2, 0.5f, 0, false) == 0.2, "uRate in the middle: the delay is untouched");
+        expect (std::fabs (uRateStaticDelay (2, 0.2, 1.0f, 0, false) - 0.194) < 1.0e-9, "Zones 1-7: clockwise = 6 ms shorter");
+        expect (std::fabs (uRateStaticDelay (2, 0.2, 0.0f, 0, false) - 0.206) < 1.0e-9, "Zones 1-7: counter-clockwise = 6 ms longer");
+        expect (std::fabs (uRateStaticDelay (2, 0.2, 1.0f, 1, true) - 0.206) < 1.0e-9, "Zones 1-7 with Skew: the right side is opposite");
+        expect (std::fabs (uRateStaticDelay (2, 0.2, 1.0f, 1, false) - 0.194) < 1.0e-9, "Zones 1-7 without Skew: both sides alike");
+        expect (std::fabs (uRateStaticDelay (0, 0.01, 1.0f, 0, false) - 0.005) < 1.0e-9, "Zone 0: clockwise = an octave up (half the delay)");
+        expect (std::fabs (uRateStaticDelay (0, 0.01, 0.0f, 0, false) - 0.02) < 1.0e-9, "Zone 0: counter-clockwise = an octave down");
+        expect (std::fabs (uRateStaticDelay (0, 0.01, 1.0f, 1, true) - 0.005) < 1.0e-9, "Zone 0: Skew does not touch uRate");
+
+        expect (std::fabs (lfoAmount (0.5f) - 0.25) < 1.0e-9 && lfoAmount (0.0f) == 0.0 && lfoAmount (1.0f) == 1.0, "LFO Depth: a squared curve");
+        expect (std::fabs (lfoFreeHz (0.0f) - 0.1) < 1.0e-9 && std::fabs (lfoFreeHz (1.0f) - 20.0) < 1.0e-9, "LFO Rate: 0.1 Hz to 20 Hz");
+        expect (lfoSyncStep (0.0f) == 0 && lfoSyncStep (1.0f) == kNumClockDivisions - 1 && lfoSyncStep (0.35f) == 3, "LFO Sync: ten bands, slowest on the left");
+        expect (std::fabs (lfoHz (0.35f, true, 120.0, 4.0) - 2.0) < 1.0e-9, "LFO Sync: a quarter note at 120 BPM is 2 Hz");
+        expect (std::fabs (lfoHz (0.0f, true, 120.0, 4.0) - 0.25) < 1.0e-9, "LFO Sync: two bars of 4/4 at 120 BPM is 0.25 Hz");
+        expect (std::fabs (lfoHz (0.35f, true, 0.0, 4.0) - 2.0) < 1.0e-9, "LFO Sync: no tempo from Logic counts as 120 BPM");
+        expect (std::fabs (lfoPeakSeconds (1.0f, 1.0) - 0.012) < 1.0e-9, "LFO Depth at the far end: +-12 ms at ordinary speeds");
+        expect (std::fabs (lfoPeakSeconds (1.0f, 20.0) - 0.6 / (kTwoPi * 20.0)) < 1.0e-9, "LFO Depth: held back at fast speeds");
+        expect (lfoPeakSeconds (0.0f, 5.0) == 0.0 && lfoPeakSemitones (0.0f) == 0.0, "LFO Depth at zero: no swing");
+        expect (lfoPeakSeconds (0.3f, 1.0) < 0.2 * lfoPeakSeconds (1.0f, 1.0), "LFO Depth: shallow over the first part of the knob");
+        expect (std::fabs (lfoValue (mph::kLfoSine, 0.25) - 1.0) < 1.0e-9 && std::fabs (lfoValue (mph::kLfoSine, 0.75) + 1.0) < 1.0e-9, "LFO: sine peaks");
+        expect (lfoValue (mph::kLfoTriangle, 0.0) == 0.0 && lfoValue (mph::kLfoTriangle, 0.25) == 1.0 && lfoValue (mph::kLfoTriangle, 0.75) == -1.0
+                    && std::fabs (lfoValue (mph::kLfoTriangle, 0.5)) < 1.0e-12, "LFO: triangle peaks and zero crossings");
+    }
+
+    void testURateSound()
+    {
+        const double sr = 48000.0;
+
+        // Middle position, Depth at zero (the defaults): nothing touched. A knob inside the dead zone gives bit-identical audio.
+        {
+            std::mt19937 rng (777);
+            std::uniform_real_distribution<float> noise (-0.5f, 0.5f);
+            auto run = [&] (float knob)
+            {
+                mph::Engine e;
+                e.prepare (sr, 512, 2);
+                mph::Params p = repeatsOnly (3, 0.6f, 0.5f);
+                p.mix = 0.6f;
+                p.uRate = knob;
+                std::mt19937 local (42);
+                std::vector<float> l (30000), r (30000);
+                for (size_t i = 0; i < l.size(); ++i) { l[i] = noise (local); r[i] = noise (local); }
+                for (int done = 0; done < 30000; done += 512)
+                {
+                    e.setParams (p);
+                    float* chans[2] = { l.data() + done, r.data() + done };
+                    e.process (chans, 2, std::min (512, 30000 - done));
+                }
+                l.insert (l.end(), r.begin(), r.end());
+                return l;
+            };
+            (void) rng;
+            expect (identical (run (0.5f), run (0.502f)), "uRate around the middle with Depth at zero: audio bit for bit the same");
+            expect (! identical (run (0.5f), run (0.8f)), "uRate away from the middle changes the sound");
+        }
+
+        // A steady offset: the delay is the Zone's plus the knob's, in every Zone, the same on both sides
+        {
+            struct Case { int zone; double seconds; float knob; };
+            const Case cases[] = { { 2, 0.2, 1.0f }, { 2, 0.2, 0.0f }, { 4, 0.8, 1.0f }, { 1, 0.04, 0.0f }, { 0, 0.01, 1.0f }, { 0, 0.01, 0.0f }, { 0, 0.004, 0.75f } };
+            for (const auto& c : cases)
+            {
+                mph::Params p = repeatsOnly (c.zone, rateForDelay (c.zone, c.seconds), 0.0f);
+                p.uRate = c.knob;
+                const auto t = delayTrace (p, 150000);
+                const double want = mph::core::uRateStaticDelay (c.zone, c.seconds, c.knob, 0, false) * sr;
+                expect (std::fabs (meanOf (t.l) - want) < 0.5 && highest (t.l) - lowest (t.l) < 0.15, "uRate: the steady offset is the delay heard (left)");
+                expect (std::fabs (meanOf (t.r) - want) < 0.5, "uRate: the steady offset is the delay heard (right)");
+            }
+        }
+
+        // With Skew: Zones 1-7 the right side is opposite, Zone 0 is not touched by Skew
+        {
+            for (int zone : { 2, 0 })
+            {
+                mph::Params p = repeatsOnly (zone, 0.8f, 0.0f);          // Skew engaged at once: left at 0.5, right at 1.0
+                p.skew = true;
+                p.uRate = 1.0f;
+                const auto t = delayTrace (p, 150000);
+                const double baseL = mph::core::freeDelaySeconds (zone, 0.5f), baseR = mph::core::freeDelaySeconds (zone, 1.0f);
+                const double wantL = mph::core::uRateStaticDelay (zone, baseL, 1.0f, 0, true) * sr;
+                const double wantR = mph::core::uRateStaticDelay (zone, baseR, 1.0f, 1, true) * sr;
+                expect (std::fabs (meanOf (t.l) - wantL) < 1.0 && std::fabs (meanOf (t.r) - wantR) < 1.0,
+                        zone == 0 ? "uRate with Skew, Zone 0: both sides the same offset (octave up)" : "uRate with Skew, Zones 1-7: the right side is opposite");
+            }
+        }
+
+        // The LFO's swing (read off the delay itself): peak = Depth's curve, in time (Zones 1-7) or semitones (Zone 0), sine and triangle
+        {
+            const float oneHz = (float) (std::log (1.0 / 0.1) / std::log (20.0 / 0.1));
+            for (int shape : { mph::kLfoSine, mph::kLfoTriangle })
+            {
+                mph::Params p = repeatsOnly (4, rateForDelay (4, 0.4), 0.0f);
+                p.uRateLfoRate = oneHz;
+                p.uRateLfoDepth = 1.0f;
+                p.uRateLfoShape = shape;
+                const auto t = delayTrace (p, 144000);
+                const double want = 0.012 * sr;
+                expect (std::fabs (meanOf (t.l) - 0.4 * sr) < 20.0, "LFO: swings around the steady delay");
+                expect (std::fabs ((highest (t.l) - lowest (t.l)) / 2.0 - want) < 0.03 * want,
+                        shape == mph::kLfoSine ? "LFO sine, full Depth: +-12 ms" : "LFO triangle, full Depth: +-12 ms");
+
+                p.uRateLfoDepth = 0.5f;
+                const auto half = delayTrace (p, 144000);
+                expect (std::fabs ((highest (half.l) - lowest (half.l)) / 2.0 - 0.25 * want) < 0.05 * 0.25 * want, "LFO, half Depth: a quarter of the swing (squared curve)");
+            }
+            mph::Params z = repeatsOnly (0, rateForDelay (0, 0.01), 0.0f);
+            z.uRateLfoRate = oneHz;
+            z.uRateLfoDepth = 0.5f;
+            const auto t0 = delayTrace (z, 144000);
+            expect (std::fabs (highest (t0.l) - 0.01 * sr * std::exp2 (3.0 / 12.0)) < 0.02 * 0.01 * sr
+                        && std::fabs (lowest (t0.l) - 0.01 * sr * std::exp2 (-3.0 / 12.0)) < 0.02 * 0.01 * sr,
+                    "LFO in Zone 0: a pitch swing in semitones (half Depth = +-3 st)");
+        }
+
+        // Fast LFO: the swing is held back (the pitch never swings wilder than the limit)
+        {
+            mph::Params p = repeatsOnly (4, rateForDelay (4, 0.4), 0.0f);
+            p.uRateLfoRate = 1.0f;                      // 20 Hz
+            p.uRateLfoDepth = 1.0f;
+            const auto t = delayTrace (p, 144000);
+            const double want = 0.6 / (mph::core::kTwoPi * 20.0) * sr;
+            expect (std::fabs ((highest (t.l) - lowest (t.l)) / 2.0 - want) < 0.06 * want, "LFO at 20 Hz: the swing is held back to the pitch limit");
+        }
+
+        // Stereo: with Skew splitting the sides the LFO swings opposite on the right (Zones 1-7); not in Zone 0; not without Skew
+        {
+            const float oneHz = (float) (std::log (1.0 / 0.1) / std::log (20.0 / 0.1));
+            auto together01 = [&] (int zone, bool skew)
+            {
+                mph::Params p = repeatsOnly (zone, skew ? 0.8f : 0.5f, 0.0f);
+                p.skew = skew;
+                p.uRateLfoRate = oneHz;
+                p.uRateLfoDepth = zone == 0 ? 0.6f : 0.8f;
+                const auto t = delayTrace (p, 144000);
+                return together (t.l, t.r);
+            };
+            expect (together01 (2, false) > 0.0, "LFO without Skew: both sides swing together");
+            expect (together01 (2, true) < 0.0, "LFO with Skew, Zones 1-7: the right side swings opposite (stereo chorus)");
+            expect (together01 (0, true) > 0.0, "LFO with Skew, Zone 0: both sides still swing together");
+        }
+
+        // LFO Sync: locked to the song position while Logic plays, and at the tempo's speed while it is stopped
+        {
+            mph::Params p = repeatsOnly (4, rateForDelay (4, 0.4), 0.0f);
+            p.uRateLfoSync = true;
+            p.uRateLfoRate = 0.35f;                     // 1/4: one cycle per beat = 2 Hz at 120 BPM
+            p.uRateLfoDepth = 1.0f;
+            const auto t = delayTrace (p, 144000, true, 0.25, 120.0, 0);
+            bool locked = true;
+            for (int n : { 60000, 70000, 90000, 100000, 130000 })
+            {
+                const double phase = 0.25 + (double) n * 2.0 / sr;
+                const double want = 0.4 * sr - 0.012 * sr * std::sin (mph::core::kTwoPi * phase);
+                locked = locked && std::fabs (t.l[(size_t) n] - want) < 25.0;
+            }
+            expect (locked, "LFO Sync while Logic plays: the swing follows the song position");
+
+            const auto stopped = delayTrace (p, 144000, false, 0.0, 120.0, 48000);
+            const double m = meanOf (stopped.l);
+            int up = 0;
+            for (size_t i = 1; i < stopped.l.size(); ++i)
+                if (stopped.l[i - 1] < m && stopped.l[i] >= m)
+                    ++up;
+            expect (up >= 3 && up <= 5, "LFO Sync while Logic is stopped: runs at the tempo's speed (2 Hz = 4 cycles in 2 s)");
+
+            const auto slower = [&]
+            {
+                mph::Params q = p;
+                const auto t2 = delayTrace (q, 144000, true, 0.0, 60.0, 48000);       // 60 BPM: 1 Hz
+                const double m2 = meanOf (t2.l);
+                int c = 0;
+                for (size_t i = 1; i < t2.l.size(); ++i)
+                    if (t2.l[i - 1] < m2 && t2.l[i] >= m2)
+                        ++c;
+                return c;
+            }();
+            expect (slower >= 1 && slower <= 3, "LFO Sync: half the tempo, half the speed");
+        }
+    }
+
+    void testURateStability()
+    {
+        const double sr = 48000.0;
+        std::mt19937 rng (2026);
+        std::uniform_real_distribution<float> knob (0.0f, 1.0f);
+        std::uniform_real_distribution<float> noise (-0.5f, 0.5f);
+        bool allFinite = true, bounded = true;
+        for (int trial = 0; trial < 60; ++trial)
+        {
+            const int channels = trial % 6 == 5 ? 1 : 2;
+            mph::Engine e;
+            e.prepare (sr, 512, channels);
+            std::vector<float> l (48000), r (48000);
+            for (size_t i = 0; i < l.size(); ++i) { l[i] = noise (rng); r[i] = noise (rng); }
+            for (int done = 0; done < 48000; done += 512)
+            {
+                mph::Params p;
+                p.mix = 0.3f + 0.7f * knob (rng);
+                p.repeats = knob (rng); p.color = knob (rng); p.rate = knob (rng);
+                p.uRate = knob (rng); p.uRateLfoRate = knob (rng); p.uRateLfoDepth = knob (rng);
+                p.zone = (int) (knob (rng) * 7.99f);
+                p.uRateLfoShape = trial & 1;
+                p.skew = (trial % 3) == 0; p.pingPong = (trial % 4) == 0; p.uRateLfoSync = (trial % 2) == 0;
+                mph::core::HostInfo host;
+                host.tempoValid = true; host.bpm = 40.0 + 200.0 * knob (rng); host.playing = (trial % 5) != 0;
+                host.ppqValid = true; host.ppq = 50.0 * knob (rng);
+                e.setParams (p);
+                e.setHost (host);
+                float* chans[2] = { l.data() + done, r.data() + done };
+                e.process (chans, channels, std::min (512, 48000 - done));
+            }
+            for (size_t i = 0; i < l.size(); ++i)
+            {
+                allFinite = allFinite && std::isfinite (l[i]) && std::isfinite (r[i]);
+                bounded = bounded && std::fabs (l[i]) < 8.0f && std::fabs (r[i]) < 8.0f;
+            }
+        }
+        expect (allFinite, "uRate and LFO with random controls, Zones, Skew, Ping Pong, sync: always finite");
+        expect (bounded, "uRate and LFO with random controls: output stays bounded");
+
+        // Turning uRate from the middle to a far end while a tone plays: smooth, no click
+        {
+            mph::Engine e;
+            e.prepare (sr, 512, 2);
+            mph::Params p = repeatsOnly (3, rateForDelay (3, 0.3), 0.0f);
+            std::vector<float> l (96000), r (96000);
+            for (size_t i = 0; i < l.size(); ++i)
+                l[i] = r[i] = 0.4f * (float) std::sin (2.0 * 3.14159265358979 * 440.0 * (double) i / sr);
+            for (int done = 0; done < 96000; done += 512)
+            {
+                p.uRate = done < 48000 ? 0.5f : 1.0f;
+                e.setParams (p);
+                float* chans[2] = { l.data() + done, r.data() + done };
+                e.process (chans, 2, std::min (512, 96000 - done));
+            }
+            float biggest = 0.0f;
+            for (size_t i = 30001; i < l.size(); ++i)
+                biggest = std::max (biggest, std::fabs (l[i] - l[i - 1]));
+            expect (biggest < 0.12f, "turning uRate: no click (sample to sample steps stay small)");
+        }
+
+        // A Zone change while the LFO swings: no crash, finite, and the new Zone's own rule is used afterwards
+        {
+            mph::Engine e;
+            e.prepare (sr, 512, 2);
+            std::vector<float> l (96000), r (96000);
+            for (size_t i = 0; i < l.size(); ++i) { l[i] = noise (rng); r[i] = l[i]; }
+            bool finite = true;
+            for (int done = 0; done < 96000; done += 512)
+            {
+                mph::Params p = repeatsOnly ((done / 2048) % 3, 0.5f, 0.6f);
+                p.uRateLfoDepth = 0.9f; p.uRateLfoRate = 0.6f; p.uRate = 0.9f;
+                e.setParams (p);
+                float* chans[2] = { l.data() + done, r.data() + done };
+                e.process (chans, 2, std::min (512, 96000 - done));
+            }
+            for (size_t i = 0; i < l.size(); ++i)
+                finite = finite && std::isfinite (l[i]) && std::isfinite (r[i]);
+            expect (finite, "Zone changes while uRate and the LFO work: finite");
+        }
+    }
+
 }
 
 int main()
@@ -1727,6 +2046,9 @@ int main()
     testSkewSound();
     testPingPong();
     testSkewStability();
+    testURateRules();
+    testURateSound();
+    testURateStability();
 
     std::printf ("engine tests: %d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;
