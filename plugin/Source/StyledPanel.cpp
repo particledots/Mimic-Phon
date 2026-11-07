@@ -1,6 +1,7 @@
 #include "StyledPanel.h"
 #include <mph/core/Color.h>
 #include <mph/core/Gain.h>
+#include <mph/core/Flip.h>
 #include <mph/core/Halo.h>
 #include <mph/core/HostClock.h>
 #include <mph/core/Repeats.h>
@@ -555,8 +556,19 @@ MimicPhonStyledPanel::Readout MimicPhonStyledPanel::getReadout() const
     // Zone 0: pitch). The LFO swings around this and is not in the read-out.
     const float uRateKnob = get (MphParams::uRate);
     const bool splitSides = stereo && skewState.skewed;
-    r.delayLeft = delayText (mph::core::uRateStaticDelay (r.zone, currentDelaySeconds (rateLeft) * hop, uRateKnob, 0, splitSides));
-    r.delayRight = delayText (mph::core::uRateStaticDelay (r.zone, currentDelaySeconds (rateRight) * hop, uRateKnob, 1, splitSides));
+    r.flipOn = get (MphParams::flip) > 0.5f;
+    if (r.flipOn)
+    {
+        // Flip: what is heard is the memory read backwards in chunks as long as the delay time (core/Flip.h). uRate only bends the pitch
+        // (Zones 1-7), so it is not in the figure; in Zone 0 it sets the pitch of the loop and the chunk. Long chunks are held to what fits.
+        r.delayLeft = delayText (mph::core::flipChunkSeconds (r.zone, currentDelaySeconds (rateLeft) * hop, uRateKnob));
+        r.delayRight = delayText (mph::core::flipChunkSeconds (r.zone, currentDelaySeconds (rateRight) * hop, uRateKnob));
+    }
+    else
+    {
+        r.delayLeft = delayText (mph::core::uRateStaticDelay (r.zone, currentDelaySeconds (rateLeft) * hop, uRateKnob, 0, splitSides));
+        r.delayRight = delayText (mph::core::uRateStaticDelay (r.zone, currentDelaySeconds (rateRight) * hop, uRateKnob, 1, splitSides));
+    }
 
     const float bpm = engine.getHostBpm();
     r.tempo = bpm > 0.0f ? "TEMPO " + juce::String (bpm, 1) + " BPM" : juce::String ("TEMPO 120.0 (assumed)");
@@ -589,7 +601,7 @@ MimicPhonStyledPanel::Readout MimicPhonStyledPanel::getReadout() const
 juce::String MimicPhonStyledPanel::currentSignature (const Readout& r) const
 {
     return juce::String (r.zone) + "|" + r.delayLeft + "|" + r.delayRight + "|" + r.tempo + "|" + r.rateText + "|"
-           + (r.synced ? "s" : "f") + (r.pingFlashing ? "p" : "n") + (flashBright ? "b" : "d") + "|" + r.pingLabel
+           + (r.synced ? "s" : "f") + (r.pingFlashing ? "p" : "n") + (flashBright ? "b" : "d") + (r.flipOn ? "F" : "-") + "|" + r.pingLabel
            + "|" + juce::String (state.getRawParameterValue (MphParams::uRateLfoSync)->load());
 }
 
@@ -710,7 +722,7 @@ void MimicPhonStyledPanel::paintZoneBand (juce::Graphics& g)
         const int x = kReadoutBox.getX(), y = kReadoutBox.getY();
         g.setColour (muted);
         g.setFont (mono (14.0f));
-        g.drawText ("DELAY", juce::Rectangle<int> (x + 18, y + 11, 80, 18), juce::Justification::centredLeft, false);
+        g.drawText (shown.flipOn ? "DELAY  FLIP" : "DELAY", juce::Rectangle<int> (x + 18, y + 11, 130, 18), juce::Justification::centredLeft, false);
         g.drawText ("TICK", juce::Rectangle<int> (x + 158, y + 11, 40, 18), juce::Justification::centredRight, false);
         g.drawText ("RATE", juce::Rectangle<int> (x + 158, y + 34, 40, 18), juce::Justification::centredRight, false);
 

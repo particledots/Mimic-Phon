@@ -58,6 +58,13 @@ void Engine::prepare (double newSampleRate, int newMaxBlockSize, int newNumChann
     colorApplied = -1.0f;
     colorCountdown = 0;
     halo.prepare (sampleRate, numChannels);
+    for (int c = 0; c < 2; ++c)
+    {
+        flipVoices[c].prepare (sampleRate);
+        dcInH[c] = dcOutH[c] = 0.0f;
+    }
+    flipAmount.snap (0.0);
+    flipWasActive = false;
 
     levelRelease = onePoleCoefficient (kLevellerReleaseSeconds, sampleRate);
     envRelease = (float) std::exp (-1.0 / (kLevellerReleaseSeconds * sampleRate));
@@ -137,7 +144,9 @@ void Engine::publishTargets()
     const float fb = core::repeatsToFeedback (params.repeats);
     delayShown.store ((float) delay);
     feedbackShown.store (fb);
-    tailShown.store ((float) (core::tailSeconds (std::max (sides.left, sides.right), fb) + core::haloTailSeconds (params.halo)));
+    // Flip: the last echo is heard backwards one chunk after it, so the tail is one chunk longer
+    const double flipExtra = params.flip ? std::min (core::kFlipMaxChunkSeconds, std::max (sides.left, sides.right)) : 0.0;
+    tailShown.store ((float) (core::tailSeconds (std::max (sides.left, sides.right), fb) + core::haloTailSeconds (params.halo) + flipExtra));
     skewEngagedShown.store (skew.engaged);
     skewSkewedShown.store (skew.skewed);
     skewCentreShown.store (skew.centre);
@@ -151,7 +160,7 @@ void Engine::clearRepeats()
     for (auto& b : buffers)
         b.clearAll();
     for (int c = 0; c < 2; ++c)
-        dcIn[c] = dcOut[c] = levelEnv[c] = 0.0f, levelGain[c] = 1.0f;
+        dcIn[c] = dcOut[c] = dcInH[c] = dcOutH[c] = levelEnv[c] = 0.0f, levelGain[c] = 1.0f;
     colorFilter.reset();
     halo.reset();
 }
@@ -225,6 +234,7 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
     }
     colorKnob.target = (double) std::min (1.0f, std::max (0.0f, params.color));
     halo.setKnob (params.halo);
+    flipAmount.target = params.flip ? 1.0 : 0.0;
 
     // uRate and its LFO: the knob and the LFO's swing glide (about 10 ms); the LFO runs free (Hz) or in note divisions of Logic's tempo.
     {
@@ -248,6 +258,7 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
     // Skew button press that moves the times) goes to the other one of the pair and crossfades.
     const double logLive[2] = { std::log (sides.left), std::log (sides.right) };
     const bool skewJump = skew.takeJump();
+    bool restartFlip = false;
     // Tempo Sync: which step each side is on (and which clock). A change is a jump in time, crossfaded like a Zone change.
     SyncKey syncKey;
     if (kTempoSyncAudible && params.tempoSync)
@@ -267,6 +278,7 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
         dryGain.snap (dryGain.target);
         wetGain.snap (wetGain.target);
         feedback.snap (feedback.target);
+        flipAmount.snap (flipAmount.target);
         crossing.snap (crossing.target);
         monoSum.snap (monoSum.target);
         colorKnob.snap (colorKnob.target);
@@ -301,6 +313,7 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
             incoming.logDelay = incoming.logTarget = logLive[c];       // the new time, at once (no glide, so no pitch effect)
         }
         headZone[1 - current] = params.zone;                           // the new read point is modulated the way the new Zone says
+        restartFlip = true;                                            // Flip: a new chunk with the new time, at once
         if (! fading)
         {
             fading = true;
@@ -320,6 +333,19 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
 
     const double minDelay = dsp::DelayBuffer::kMinDelaySamples;
     const double maxDelay = buffers[0].maxDelaySamples();
+
+    // Flip: a jump starts a new chunk; a long chunk is also restarted when Rate has moved far from the length it started with
+    if (params.flip || flipAmount.value > 0.0)
+    {
+        const int audible = fading ? 1 - current : current;
+        for (int c = 0; c < channelCount; ++c)
+        {
+            if (restartFlip)
+                flipVoices[c].restart();
+            if (headZone[audible] != 0)
+                flipVoices[c].checkLength (std::min (core::kFlipMaxChunkSeconds * sampleRate, std::exp (heads[c][audible].logDelay) * sampleRate), sampleRate);
+        }
+    }
 
     // ---- the sound ----
     for (int n = 0; n < numSamples; ++n)
@@ -341,6 +367,15 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
         }
 
         const float crossG = crossing.next (rampCoefficient), monoG = monoSum.next (rampCoefficient);
+        const float flipG = flipAmount.next (rampCoefficient);
+        const bool flipActive = flipAmount.value > 0.0 || flipAmount.target > 0.0;
+        if (flipActive && ! flipWasActive)
+            for (int c = 0; c < 2; ++c)
+                dcInH[c] = dcIn[c], dcOutH[c] = dcOut[c];                  // the second DC blocker starts where the first one is
+        else if (! flipActive && flipWasActive)
+            for (int c = 0; c < 2; ++c)
+                flipVoices[c].reset();                                      // the reversed sound has faded out: the readers rest
+        flipWasActive = flipActive;
 
         // uRate and its LFO: one offset for the sample, added to each read point's own (glided) time below
         uRateKnob.next (rampCoefficient);
@@ -382,6 +417,7 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
         // First every side's repeat is read (and its DC taken out); then Halo works on both sides' repeats; then each side's feedback is
         // prepared; then everything is written (Ping Pong and Swap cross the two).
         float x[2] = { 0.0f, 0.0f }, wet[2] = { 0.0f, 0.0f }, blocked[2] = { 0.0f, 0.0f }, fedBack[2] = { 0.0f, 0.0f };
+        float heardWet[2] = { 0.0f, 0.0f }, haloIn[2] = { 0.0f, 0.0f };      // what is heard (the repeat, or its reverse) and what Halo works on
         for (int c = 0; c < channelCount; ++c)
         {
             x[c] = channels[c][n];
@@ -400,11 +436,44 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
                 b = 0.0f;
             dcOut[c] = b;
             blocked[c] = b;
+            heardWet[c] = wet[c];
+            haloIn[c] = b;
+        }
+
+        // Flip (milestone 10): the same memory read backwards, in chunks as long as the delay time. Off = nothing here runs, bit for bit.
+        if (flipActive)
+        {
+            const int audible = fading ? 1 - current : current;
+            const int zoneNow = headZone[audible];
+            for (int c = 0; c < channelCount; ++c)
+            {
+                // uRate and its LFO move the reading point (Zones 1-7), so the reversed sound bends; clockwise = higher pitch as before
+                double offsetSamples = 0.0;
+                if (modulating && zoneNow != 0)
+                    offsetSamples = (c == 1 ? rightSide.value : 1.0) * (knobNow * core::kURateKnobMaxSeconds + lfoSmoothed * lfoSeconds.value) * sampleRate;
+                // A new chunk is as long as the delay time (in Zone 0 with uRate's pitch in it), held to what the memory can read backwards
+                auto chunk = [&] ()
+                {
+                    double seconds = std::exp (heads[c][audible].logDelay);
+                    if (zoneNow == 0 && modulating)
+                        seconds = modulated (0, seconds, c);
+                    return std::min (core::kFlipMaxChunkSeconds * sampleRate, std::max (core::kFlipMinChunkSamples, seconds * sampleRate));
+                };
+                const float reversed = flipVoices[c].process (buffers[c], offsetSamples, minDelay, maxDelay, chunk);
+                heardWet[c] = wet[c] + flipG * (reversed - wet[c]);
+                // Halo works on the reversed sound that is heard (its own DC blocker; flipG = 0 gives exactly the forward repeat's)
+                float bh = heardWet[c] - dcInH[c] + dcCoefficient * dcOutH[c];
+                dcInH[c] = heardWet[c];
+                if (std::fabs (bh) < 1.0e-20f)
+                    bh = 0.0f;
+                dcOutH[c] = bh;
+                haloIn[c] = blocked[c] + flipG * (bh - blocked[c]);
+            }
         }
 
         // Halo (milestone 9): diffusion of the repeat that is heard. Off = nothing is touched, bit for bit.
         float haloOut[2] = { 0.0f, 0.0f };
-        const bool haloOn = halo.process (blocked, haloOut);
+        const bool haloOn = halo.process (haloIn, haloOut);
         const float haloLevel = haloOn ? halo.level() : 0.0f;
         const float haloInject = haloOn ? halo.injection() : 0.0f;
 
@@ -439,7 +508,7 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
             }
             buffers[c].write (colorFilter.process (c, live + returned));
 
-            const float heard = haloOn ? core::haloMix (wet[c], haloOut[c], haloLevel) : wet[c];
+            const float heard = haloOn ? core::haloMix (heardWet[c], haloOut[c], haloLevel) : heardWet[c];
             channels[c][n] = (dryG * x[c] + wetG * heard) * outG;
         }
 

@@ -1,12 +1,12 @@
 // The Mimic-Phon engine. Plain C++17, no JUCE, no plugin code.
 //
-// Milestone 9: the core repeater (milestone 4), Color (5), Skew, Ping Pong and Swap (6), uRate with its LFO (7), Tempo Sync of Rate (8), and Halo.
+// Milestone 10: the core repeater (milestone 4), Color (5), Skew, Ping Pong and Swap (6), uRate with its LFO (7), Tempo Sync of Rate (8), Halo (9), and Flip.
 // What works now, and what does not:
 //
 //   Works:   Input Level and the Input Gain step, Zone, Rate, Repeats, Mix, Output Level, Clear, Color, Skew, Ping Pong / Swap,
-//            uRate and the uRate LFO (Rate, Depth, Sine / Triangle, Sync to Logic's tempo), Tempo Sync of Rate, Halo.
-//   Not yet: Flip (10), Hold (11).
-//            Those controls are read but do nothing.
+//            uRate and the uRate LFO (Rate, Depth, Sine / Triangle, Sync to Logic's tempo), Tempo Sync of Rate, Halo, Flip.
+//   Not yet: Hold (11).
+//            That control is read but does nothing.
 //
 // How it sounds, in short: the input is written into one shared stereo buffer (core/DelayBuffer.h, 41.8 s or more) that serves
 // all eight Zones. The repeat is the buffer read back at the delay time that Zone and Rate give (core/ZoneMap.h, the same
@@ -44,6 +44,13 @@
 //     the "Filter-Verb" patch). At high settings the halo is also injected into the feedback path (scaled by Repeats). Color sets its
 //     timbre. The tank's loop gain stays below 0.9, so it cannot run away by itself; the leveller still guards the repeat loop.
 //
+//   * Flip (core/Flip.h): every repeat is heard backwards. The repeat loop itself keeps going forwards (so Repeats, Color, Skew, Ping Pong, Tempo
+//     Sync and Clear are untouched); a second reader plays the shared buffer backwards in chunks as long as the delay time, joined by short
+//     crossfades, and that is what is heard (and what Halo works on). The chunk length is taken when a chunk starts, so Rate moving gives no
+//     doppler; a Zone change, a Tempo Sync step or a Skew / Ping Pong jump starts a new chunk at once. In Zones 0 and 1 the chunks are a few
+//     milliseconds long: the manual's "total protonic reversal". uRate and its LFO still bend the reversed sound. With Flip off nothing is
+//     touched, bit for bit.
+//
 // Window-only things from milestone 3 (never affect the sound): Logic's tempo as last heard, and two counters for the blinking
 // lights: one goes up at every tick of the tempo clock (TICK), the other every time the current delay time has passed (RATE).
 
@@ -55,6 +62,7 @@
 #include "Params.h"
 #include "core/Color.h"
 #include "core/DelayBuffer.h"
+#include "core/Flip.h"
 #include "core/Halo.h"
 #include "core/HostClock.h"
 #include "core/Repeats.h"
@@ -198,6 +206,13 @@ namespace mph
 
         // Halo (milestone 9)
         core::Halo halo;
+
+        // Flip (milestone 10): a reverse reader per side; the amount fades the reversed sound in and out (10 ms); a second DC blocker takes the
+        // DC out of the reversed sound that Halo works on (the feedback keeps its own, on the forward repeat)
+        core::FlipVoice flipVoices[2];
+        Ramp flipAmount;
+        float dcInH[2] = { 0.0f, 0.0f }, dcOutH[2] = { 0.0f, 0.0f };
+        bool flipWasActive = false;
 
         // Color (milestone 5): the knob glides (about 30 ms) and the filter's coefficients follow every 16 samples
         core::ColorFilter colorFilter;

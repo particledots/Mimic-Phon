@@ -7,7 +7,7 @@
 // The read-outs of the controls that make sound (milestone 4: Input and Output Level, Mix, Repeats, Zone, Rate) use the engine's own
 // functions (core/Gain.h, core/Repeats.h, core/ZoneMap.h), so the number shown is the number heard. For the controls that do not make
 // sound yet, the read-out is a first guess at what the position will mean (a percentage, semitones, Hertz); these are tuned together
-// with the sound in the later milestones. The control ids never change. With Tempo Sync on (milestone 8) the Rate card names the clock step and the delay read-out is the clocked time. The Halo card (milestone 9) reads the engine's own word and percentage (core/Halo.h).
+// with the sound in the later milestones. The control ids never change. With Tempo Sync on (milestone 8) the Rate card names the clock step and the delay read-out is the clocked time. The Halo card (milestone 9) reads the engine's own word and percentage (core/Halo.h). With Flip on (milestone 10) the delay box shows the length of the reversed chunk that is heard (core/Flip.h) and its header says FLIP.
 //
 // The panel is laid out in a fixed 1200 x 800 space; the editor scales it to the window.
 // (The look-and-feel, fonts, KnobCard and the chip selector follow PhenomeEon's StyledPanel, copied and renamed.)
@@ -173,6 +173,7 @@ public:
         bool synced = false;
         bool pingFlashing = false;              // Ping Pong or Swap is working (the Zone window flashes)
         bool skewed = false;                    // the two sides are noticeably different
+        bool flipOn = false;                    // Flip is on: the delay box shows the length of the reversed chunk (header "DELAY FLIP")
         juce::String pingLabel;                 // the Ping Pong / Swap button's label: "PING PONG / SWAP" (off), "PING PONG" or "SWAP"
     };
     Readout getReadout() const;

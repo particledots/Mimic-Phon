@@ -4,12 +4,14 @@
 // milestone 6 adds Skew, Ping Pong and Swap: the rules, the echo times heard on each side, the routing, stability, no clicks;
 // milestone 7 adds uRate and its LFO: the rules, the steady offset in every Zone, the LFO's swing and speed, the sync lock, stereo opposite, stability;
 // milestone 8 adds Tempo Sync of Rate: the clock, the 13 steps heard, Zones, Clock Division, tempo, Skew sides, jumps instead of glides, stability;
-// milestone 9 adds Halo: the rules, off bit for bit, the halo with Repeats fully left (Filter-Verb), size and tail, width, Color's timbre, no run-away).
+// milestone 9 adds Halo: the rules, off bit for bit, the halo with Repeats fully left (Filter-Verb), size and tail, width, Color's timbre, no run-away;
+// milestone 10 adds Flip: the rules, off bit for bit, every repeat reversed, chunk length, no doppler from Rate, uRate still bends, Skew / Ping Pong / Tempo Sync / Clear / Color / Halo with Flip, stability).
 // Prints "engine tests: N checks, F failed" and exits with 0 only if nothing failed.
 
 #include <mph/Engine.h>
 #include <mph/Params.h>
 #include <mph/core/Color.h>
+#include <mph/core/Flip.h>
 #include <mph/core/Gain.h>
 #include <mph/core/Halo.h>
 #include <mph/core/HostClock.h>
@@ -21,6 +23,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
 #include <functional>
 #include <random>
 #include <vector>
@@ -2722,6 +2725,557 @@ namespace
             expect (ok && worst < 4.0, colorCase == 0 ? "Halo fully right with beyond-infinite Repeats for 20 s, thin Color: bounded" : "the same with dark Color: bounded");
         }
     }
+
+    // ======================= milestone 10: Flip =======================
+
+    constexpr double kSr = 48000.0;
+
+    // Runs the engine over a whole signal with the settings (and a host tempo if given), 512-sample blocks; "change" may alter the settings per block.
+    HaloRun runFlip (mph::Params p, std::vector<float> inL, std::vector<float> inR, int channels = 2, const mph::core::HostInfo* host = nullptr,
+                     const std::function<void (int, mph::Params&)>& change = {})
+    {
+        mph::Engine e;
+        e.prepare (kSr, 512, channels);
+        if (host != nullptr)
+            e.setHost (*host);
+        HaloRun out;
+        out.l = std::move (inL);
+        out.r = inR.empty() ? out.l : std::move (inR);
+        const int total = (int) out.l.size();
+        int block = 0;
+        for (int done = 0; done < total; done += 512, ++block)
+        {
+            const int n = std::min (512, total - done);
+            if (change)
+                change (block, p);
+            e.setParams (p);
+            float* chans[2] = { out.l.data() + done, out.r.data() + done };
+            e.process (chans, channels, n);
+        }
+        out.tail = e.getTailSeconds();
+        return out;
+    }
+
+    std::vector<float> rampSignal (int length, float slope)
+    {
+        std::vector<float> v ((size_t) length);
+        for (int i = 0; i < length; ++i)
+            v[(size_t) i] = slope * (float) i;
+        return v;
+    }
+
+    std::vector<float> sineSignal (int length, double hz, float amplitude)
+    {
+        std::vector<float> v ((size_t) length);
+        for (int i = 0; i < length; ++i)
+            v[(size_t) i] = amplitude * (float) std::sin (2.0 * 3.14159265358979323846 * hz * (double) i / kSr);
+        return v;
+    }
+
+    // A sharp attack at startSeconds, then a 20 ms decay of a 1 kHz tone: played backwards it swells up to a sudden stop.
+    std::vector<float> burstSignal (int length, double startSeconds, float amplitude)
+    {
+        std::vector<float> v ((size_t) length, 0.0f);
+        for (int i = (int) (startSeconds * kSr); i < length; ++i)
+        {
+            const double t = ((double) i - startSeconds * kSr) / kSr;
+            v[(size_t) i] = amplitude * (float) (std::exp (-t / 0.02) * std::sin (2.0 * 3.14159265358979323846 * 1000.0 * t));
+        }
+        return v;
+    }
+
+    // A ramp played backwards falls at the same slope; where a chunk joins the next one the slope breaks. The first index of every break after "from".
+    std::vector<int> rampBreaks (const std::vector<float>& out, float slope, int from)
+    {
+        std::vector<int> breaks;
+        int last = -100000;
+        for (int n = from; n + 1 < (int) out.size(); ++n)
+        {
+            const double d = (double) out[(size_t) n + 1] - (double) out[(size_t) n];
+            if (std::fabs (d + (double) slope) > 0.5 * (double) slope)
+            {
+                if (n - last > 200)
+                    breaks.push_back (n);
+                last = n;
+            }
+        }
+        return breaks;
+    }
+
+    double medianSpacing (const std::vector<int>& breaks)
+    {
+        std::vector<double> gaps;
+        for (size_t i = 1; i < breaks.size(); ++i)
+            gaps.push_back ((double) (breaks[i] - breaks[i - 1]));
+        if (gaps.empty())
+            return 0.0;
+        std::sort (gaps.begin(), gaps.end());
+        return gaps[gaps.size() / 2];
+    }
+
+    // The share of samples in [from, to) where the output's slope is "wanted" times the ramp's slope.
+    double slopeShare (const std::vector<float>& out, float slope, double wanted, int from, int to)
+    {
+        int good = 0, all = 0;
+        for (int n = from; n + 1 < to && n + 1 < (int) out.size(); ++n, ++all)
+            if (std::fabs ((double) out[(size_t) n + 1] - (double) out[(size_t) n] - wanted * (double) slope) < 0.05 * (double) slope)
+                ++good;
+        return all > 0 ? (double) good / (double) all : 0.0;
+    }
+
+    double zeroCrossHz (const std::vector<float>& v, int from, int to)
+    {
+        int crossings = 0;
+        for (int i = from + 1; i < to && i < (int) v.size(); ++i)
+            if ((v[(size_t) i - 1] < 0.0f) != (v[(size_t) i] < 0.0f))
+                ++crossings;
+        return 0.5 * (double) crossings / ((double) (to - from) / kSr);
+    }
+
+    // The median of |measured pitch / wanted pitch - 1| over 100 ms windows from "from" to "to": robust against the few windows that hold a join.
+    double medianPitchError (const std::vector<float>& v, double hz, int from, int to)
+    {
+        std::vector<double> errors;
+        for (int a = from; a + 4800 <= to; a += 4800)
+            errors.push_back (std::fabs (zeroCrossHz (v, a, a + 4800) / hz - 1.0));
+        if (errors.empty())
+            return 1.0;
+        std::sort (errors.begin(), errors.end());
+        return errors[errors.size() / 2];
+    }
+
+    double highShare (const std::vector<float>& v, int from, int to)
+    {
+        double diff = 0.0, all = 1.0e-30;
+        for (int i = from + 1; i < to && i < (int) v.size(); ++i)
+        {
+            const double d = (double) v[(size_t) i] - (double) v[(size_t) i - 1];
+            diff += d * d;
+            all += (double) v[(size_t) i] * v[(size_t) i];
+        }
+        return diff / all;
+    }
+
+    int atSeconds (double seconds) { return (int) std::lround (seconds * kSr); }
+
+    // A burst: the energy in the 40 ms before the reversed peak and in the 40 ms after it
+    struct Swell { double before, after; };
+    Swell swellAround (const std::vector<float>& out, double peakSeconds)
+    {
+        return { energy (out, atSeconds (peakSeconds - 0.04), atSeconds (peakSeconds)), energy (out, atSeconds (peakSeconds + 0.015), atSeconds (peakSeconds + 0.055)) };
+    }
+
+    void testFlipRules()
+    {
+        using namespace mph::core;
+        expect (std::fabs (flipChunkSeconds (4, 0.6531, 0.5f) - 0.6531) < 1.0e-12, "Flip: the chunk is as long as the delay time (Zone 4)");
+        expect (std::fabs (flipChunkSeconds (2, 0.2, 1.0f) - 0.2) < 1.0e-12 && std::fabs (flipChunkSeconds (2, 0.2, 0.0f) - 0.2) < 1.0e-12,
+                "Flip: uRate does not change the chunk in Zones 1 to 7 (it only bends the pitch)");
+        expect (std::fabs (flipChunkSeconds (0, 0.01, 1.0f) - 0.005) < 1.0e-9 && std::fabs (flipChunkSeconds (0, 0.01, 0.0f) - 2.0 * 0.01) < 1.0e-9,
+                "Flip: in Zone 0 uRate sets the pitch of the loop, so it sets the chunk (one octave up = half as long, one octave down = twice)");
+        expect (flipChunkSeconds (7, 41.796, 0.5f) == kFlipMaxChunkSeconds && flipChunkSeconds (7, 30.0, 0.5f) == kFlipMaxChunkSeconds,
+                "Flip: a chunk is held to what the memory can read backwards (the top half of Zone 7)");
+        expect (kFlipMaxChunkSeconds > 20.0 && kFlipMaxChunkSeconds < 20.9 && 2.0 * (kFlipMaxChunkSeconds + kFlipFadeMaxSeconds) < mph::kLongestSeconds,
+                "Flip: twice the longest chunk and its join fit inside the 41.8 s memory");
+    }
+
+    void testFlipSound()
+    {
+        using namespace mph;
+        std::mt19937 rng (91);
+        std::uniform_real_distribution<float> noise (-0.5f, 0.5f);
+
+        // ---- with Flip off nothing changes: pressed, released, the repeat loop is exactly as if it had never been touched ----
+        {
+            const int total = (int) (kSr * 5.0);
+            std::vector<float> inL ((size_t) total), inR ((size_t) total);
+            for (int i = 0; i < total; ++i) { inL[(size_t) i] = noise (rng); inR[(size_t) i] = noise (rng); }
+            mph::Params p;
+            p.zone = 3;
+            p.rate = 0.4f;
+            p.repeats = 0.6f;
+            p.mix = 0.6f;
+            p.color = 0.5f;
+            const auto never = runFlip (p, inL, inR);
+            const auto pressed = runFlip (p, inL, inR, 2, nullptr, [] (int block, mph::Params& q) { q.flip = block >= 94 && block < 188; });   // about 1 s to 2 s
+            const int from = atSeconds (2.5);
+            const bool same = std::memcmp (never.l.data() + from, pressed.l.data() + from, (size_t) (total - from) * sizeof (float)) == 0
+                              && std::memcmp (never.r.data() + from, pressed.r.data() + from, (size_t) (total - from) * sizeof (float)) == 0;
+            const bool sameBefore = std::memcmp (never.l.data(), pressed.l.data(), (size_t) atSeconds (0.9) * sizeof (float)) == 0;
+            const bool differsDuring = ! std::memcmp (never.l.data() + atSeconds (1.2), pressed.l.data() + atSeconds (1.2), (size_t) atSeconds (0.5) * sizeof (float));
+            expect (sameBefore, "Flip never pressed: the output is bit for bit what it was before milestone 10 (same until the press)");
+            expect (! differsDuring, "Flip pressed: the output is different while it is on");
+            expect (same, "Flip pressed and released: afterwards the output is bit for bit the same as if Flip had never been touched (the repeat loop runs forwards all along)");
+        }
+
+        // ---- the repeat that is heard is read backwards: a ramp falls, a click lands mirrored round the chunk start ----
+        {
+            const double delay = core::freeDelaySeconds (2, rateForDelay (2, 0.2));
+            const float slope = 5.0e-6f;
+            mph::Params p = repeatsOnly (2, rateForDelay (2, 0.2));
+            p.flip = true;
+            const auto flipped = runFlip (p, rampSignal (atSeconds (2.0), slope), {});
+            p.flip = false;
+            const auto forward = runFlip (p, rampSignal (atSeconds (2.0), slope), {});
+            const double fallShare = slopeShare (flipped.l, slope, -1.0, atSeconds (0.5), atSeconds (2.0));
+            expect (fallShare > 0.80, "Flip: the repeat heard runs backwards (a rising ramp comes out falling at the same slope in the body of each chunk)");
+            expect (slopeShare (forward.l, slope, 1.0, atSeconds (0.5), atSeconds (2.0)) > 0.95 && slopeShare (forward.l, slope, -1.0, atSeconds (0.5), atSeconds (2.0)) < 0.01,
+                    "Flip off: the same ramp comes out rising (as before)");
+            const double spacing = medianSpacing (rampBreaks (flipped.l, slope, atSeconds (0.25)));
+            expect (std::fabs (spacing - delay * kSr) <= 2.0, "Flip: a chunk is as long as the delay time the window shows (200 ms)");
+        }
+        {
+            mph::Params p = repeatsOnly (3, rateForDelay (3, 0.25));
+            p.flip = true;
+            const auto out = runFlip (p, impulse (atSeconds (1.5), atSeconds (0.05), 0.5f), {});
+            const int peak = peakIndex (out.l, 0, (int) out.l.size());
+            expect (std::abs (peak - atSeconds (0.45)) <= 2 && std::fabs (out.l[(size_t) peak]) > 0.2f,
+                    "Flip: a click at 50 ms comes back at 450 ms (mirrored round the start of the second 250 ms chunk)");
+        }
+
+        // ---- every repeat is reversed (no alternating), and Repeats fully left gives one reversed echo ----
+        {
+            const double delay = 0.25;
+            mph::Params p = repeatsOnly (3, rateForDelay (3, delay), 0.6f);
+            p.flip = true;
+            const auto flipped = runFlip (p, burstSignal (atSeconds (2.0), 0.05, 0.5f), {});
+            const Swell e1 = swellAround (flipped.l, 0.45), e2 = swellAround (flipped.l, 0.70), e3 = swellAround (flipped.l, 0.95);
+            expect (e1.before > 20.0 * e1.after + 1.0e-9 && e2.before > 20.0 * e2.after + 1.0e-9 && e3.before > 20.0 * e3.after + 1.0e-9,
+                    "Flip: the first three echoes all swell up and stop short (every repeat is reversed, none plays forwards)");
+            expect (e2.before > 0.1 * e1.before && e2.before < 1.0 * e1.before && e3.before > 0.1 * e2.before && e3.before < 1.0 * e2.before,
+                    "Flip: the reversed echoes die away by the Repeats amount");
+            p.flip = false;
+            const auto forward = runFlip (p, burstSignal (atSeconds (2.0), 0.05, 0.5f), {});
+            const Swell f1 = swellAround (forward.l, 0.30);      // the forward echo starts at 300 ms
+            expect (f1.after > 20.0 * f1.before, "Flip off: the same echo is a sharp start and a decay");
+            p.flip = true;
+            p.repeats = 0.0f;
+            const auto once = runFlip (p, burstSignal (atSeconds (2.0), 0.05, 0.5f), {});
+            const Swell o1 = swellAround (once.l, 0.45), o2 = swellAround (once.l, 0.70);
+            expect (o1.before > 1.0e-3 && o2.before < 1.0e-6 * o1.before, "Flip with Repeats fully left: one reversed echo and then silence");
+        }
+
+        // ---- Zones 0 and 1: total protonic reversal (a flipped chunk of a few milliseconds makes new tones) ----
+        {
+            auto residualShare = [] (const std::vector<float>& v, double hz, int from, int to)
+            {
+                double sinSum = 0.0, cosSum = 0.0, all = 1.0e-30;
+                const int n = to - from;
+                for (int i = from; i < to; ++i)
+                {
+                    const double ph = 2.0 * 3.14159265358979323846 * hz * (double) i / kSr;
+                    sinSum += v[(size_t) i] * std::sin (ph);
+                    cosSum += v[(size_t) i] * std::cos (ph);
+                    all += (double) v[(size_t) i] * v[(size_t) i];
+                }
+                const double a = 2.0 * sinSum / n, b = 2.0 * cosSum / n;
+                const double fitted = 0.5 * (a * a + b * b) * n;
+                return std::max (0.0, 1.0 - fitted / all);
+            };
+            for (int zone = 0; zone <= 1; ++zone)
+            {
+                mph::Params p = repeatsOnly (zone, 0.5f);
+                p.flip = true;
+                const auto flipped = runFlip (p, sineSignal (atSeconds (1.0), 1000.0, 0.3f), {});
+                p.flip = false;
+                const auto forward = runFlip (p, sineSignal (atSeconds (1.0), 1000.0, 0.3f), {});
+                const double newTones = residualShare (flipped.l, 1000.0, atSeconds (0.3), atSeconds (0.9));
+                const double none = residualShare (forward.l, 1000.0, atSeconds (0.3), atSeconds (0.9));
+                expect (newTones > 0.03 && none < 1.0e-4,
+                        zone == 0 ? "Flip in Zone 0: a pure tone gets harmonics and sidebands (total protonic reversal); without Flip it stays pure"
+                                  : "Flip in Zone 1: a pure tone gets harmonics and sidebands; without Flip it stays pure");
+            }
+        }
+
+        // ---- Rate moving gives no doppler with Flip (and does without it) ----
+        {
+            const int total = atSeconds (5.0);
+            auto sweep = [] (int block, mph::Params& q)
+            {
+                const double t = (double) block * 512.0 / kSr;
+                const double x = std::min (1.0, std::max (0.0, (t - 1.5) / 2.0));
+                q.rate = rateForDelay (4, 0.5 * std::pow (0.7 / 0.5, x));      // 500 ms to 700 ms over two seconds
+            };
+            mph::Params p = repeatsOnly (4, rateForDelay (4, 0.5));
+            p.flip = true;
+            const auto flipped = runFlip (p, sineSignal (total, 1000.0, 0.3f), {}, 2, nullptr, sweep);
+            p.flip = false;
+            const auto forward = runFlip (p, sineSignal (total, 1000.0, 0.3f), {}, 2, nullptr, sweep);
+            const double flipError = medianPitchError (flipped.l, 1000.0, atSeconds (1.7), atSeconds (3.5));
+            const double forwardError = medianPitchError (forward.l, 1000.0, atSeconds (1.7), atSeconds (3.5));
+            expect (flipError < 0.01, "Flip: Rate moving from 500 to 700 ms leaves the pitch alone (no doppler)");
+            expect (forwardError > 0.05, "Flip off: the same move bends the pitch by about 10 % (the doppler that Flip leaves out)");
+        }
+
+        // ---- uRate and its LFO still bend the reversed sound ----
+        {
+            mph::Params p = repeatsOnly (5, rateForDelay (5, 1.5));
+            p.flip = true;
+            p.uRateLfoDepth = 0.0f;
+            const auto still = runFlip (p, sineSignal (atSeconds (6.0), 1000.0, 0.3f), {});
+            p.uRateLfoDepth = 1.0f;
+            p.uRateLfoRate = 0.5f;
+            const auto wobble = runFlip (p, sineSignal (atSeconds (6.0), 1000.0, 0.3f), {});
+            const double quiet = medianPitchError (still.l, 1000.0, atSeconds (1.7), atSeconds (5.5));
+            const double bent = medianPitchError (wobble.l, 1000.0, atSeconds (1.7), atSeconds (5.5));
+            expect (quiet < 0.01 && bent > 0.03, "Flip: the uRate LFO still bends the pitch of the reversed sound (about 7 % at the median at full Depth), and without it the pitch is exact");
+        }
+        {
+            // clockwise and positive LFO = pitch up, as for the forward repeats: the right side (Skew off) is not inverted
+            mph::Params p = repeatsOnly (2, rateForDelay (2, 0.2));
+            p.flip = true;
+            p.uRate = 1.0f;
+            const double delay = core::freeDelaySeconds (2, p.rate);
+            const auto out = runFlip (p, rampSignal (atSeconds (2.0), 5.0e-6f), {});
+            const double spacing = medianSpacing (rampBreaks (out.l, 5.0e-6f, atSeconds (0.25)));
+            expect (std::fabs (spacing - delay * kSr) <= 2.0, "Flip with uRate fully clockwise: the chunk is still as long as the delay time (uRate only moves the reading point)");
+        }
+
+        // ---- Skew: each side has its own chunk length ----
+        {
+            const int total = atSeconds (8.0);
+            const float slope = 1.5e-6f;
+            mph::Params p = repeatsOnly (4, 0.5f);
+            p.flip = true;
+            p.skew = true;
+            mph::Engine e;
+            e.prepare (kSr, 512, 2);
+            std::vector<float> l = rampSignal (total, slope), r = l;
+            for (int done = 0, block = 0; done < total; done += 512, ++block)
+            {
+                p.rate = block == 0 ? 0.5f : 0.9f;
+                e.setParams (p);
+                float* chans[2] = { l.data() + done, r.data() + done };
+                e.process (chans, 2, std::min (512, total - done));
+            }
+            const auto sides = e.getSkewState().ratesNow (0.9f);
+            const double wantLeft = core::freeDelaySeconds (4, sides.left) * kSr, wantRight = core::freeDelaySeconds (4, sides.right) * kSr;
+            const double haveLeft = medianSpacing (rampBreaks (l, slope, atSeconds (3.5))), haveRight = medianSpacing (rampBreaks (r, slope, atSeconds (3.5)));
+            expect (std::fabs (haveLeft - wantLeft) <= 3.0 && std::fabs (haveRight - wantRight) <= 3.0 && wantRight > 2.5 * wantLeft,
+                    "Flip with Skew: the left and right chunks are as long as the two delay times the window shows (375 ms and 1.14 s)");
+        }
+
+        // ---- Ping Pong: each hop is half the delay time, the repeats still bounce ----
+        {
+            const double hop = 0.5 * core::freeDelaySeconds (4, 0.5f) * kSr;
+            const float slope = 5.0e-6f;
+            mph::Params p = repeatsOnly (4, 0.5f);
+            p.flip = true;
+            p.pingPong = true;
+            const auto out = runFlip (p, rampSignal (atSeconds (3.0), slope), {});
+            expect (std::fabs (medianSpacing (rampBreaks (out.l, slope, atSeconds (0.5))) - hop) <= 3.0, "Flip with Ping Pong: the chunk is half the delay time (the hop the window shows)");
+
+            p.repeats = 0.6f;
+            std::vector<float> burstL = burstSignal (atSeconds (4.0), 0.1, 0.5f), burstR = burstL;
+            const auto bounce = runFlip (p, burstL, burstR);
+            expect (energy (bounce.r, atSeconds (0.5), atSeconds (4.0)) > 1.0e-3 && energy (bounce.l, atSeconds (0.5), atSeconds (4.0)) > 1.0e-3,
+                    "Flip with Ping Pong: the reversed repeats still bounce to the right side");
+        }
+
+        // ---- Tempo Sync: the chunk is the clocked time ----
+        {
+            mph::core::HostInfo host;
+            host.tempoValid = true;
+            host.bpm = 120.0;
+            const float slope = 5.0e-6f;
+            for (int zone = 3; zone <= 4; ++zone)
+            {
+                mph::Params p = repeatsOnly (zone, 0.5f);
+                p.flip = true;
+                p.tempoSync = true;
+                const auto out = runFlip (p, rampSignal (atSeconds (3.0), slope), {}, 2, &host);
+                const double want = (zone == 4 ? 0.5 : 0.25) * kSr;
+                expect (std::fabs (medianSpacing (rampBreaks (out.l, slope, atSeconds (0.6))) - want) <= 3.0,
+                        zone == 4 ? "Flip with Tempo Sync: 1/1 at 120 BPM in Zone 4 reverses in 500 ms chunks" : "Flip with Tempo Sync: 1/1 at 120 BPM in Zone 3 reverses in 250 ms chunks");
+            }
+        }
+
+        // ---- Clear, Color and Halo with Flip ----
+        {
+            const int total = atSeconds (3.0);
+            std::vector<float> inL ((size_t) total, 0.0f), inR ((size_t) total, 0.0f);
+            for (int i = 0; i < atSeconds (1.0); ++i) { inL[(size_t) i] = noise (rng); inR[(size_t) i] = noise (rng); }
+            mph::Params p = repeatsOnly (3, rateForDelay (3, 0.3), 0.7f);
+            p.flip = true;
+            const auto out = runFlip (p, inL, inR, 2, nullptr, [] (int block, mph::Params& q) { q.clear = block == 120; });
+            expect (energy (out.l, atSeconds (0.9), atSeconds (1.2)) > 1.0e-3, "Flip: there is sound to clear");
+            expect (energy (out.l, 120 * 512 + 512, total) < 1.0e-12 && energy (out.r, 120 * 512 + 512, total) < 1.0e-12, "Flip with Clear: everything stops at once (the reversed reader finds only silence)");
+        }
+        {
+            const int total = atSeconds (4.0);
+            std::vector<float> inL ((size_t) total), inR ((size_t) total);
+            for (int i = 0; i < total; ++i) { inL[(size_t) i] = noise (rng); inR[(size_t) i] = noise (rng); }
+            mph::Params p = repeatsOnly (3, rateForDelay (3, 0.3), 0.7f);
+            p.flip = true;
+            p.color = 0.8f;
+            const auto clean = runFlip (p, inL, inR);
+            p.color = 0.1f;
+            const auto dark = runFlip (p, inL, inR);
+            expect (highShare (dark.l, atSeconds (1.5), total) < 0.5 * highShare (clean.l, atSeconds (1.5), total),
+                    "Flip with a dark Color: the reversed repeats are darker (Color is written into the repeats, so the reversed sound has it)");
+            // a low tone: a thin Color takes it away from every echo
+            p.color = 0.8f;
+            const auto lowClean = runFlip (p, sineSignal (total, 200.0, 0.3f), {});
+            p.color = 1.0f;
+            const auto lowThin = runFlip (p, sineSignal (total, 200.0, 0.3f), {});
+            expect (energy (lowThin.l, atSeconds (1.5), total) < 0.1 * energy (lowClean.l, atSeconds (1.5), total) && energy (lowThin.l, atSeconds (1.5), total) > 1.0e-3,
+                    "Flip with a thin Color: the reversed repeats lose their lows and still sound");
+        }
+        {
+            mph::Params p = repeatsOnly (3, rateForDelay (3, 0.25));
+            p.flip = true;
+            const auto dry = runFlip (p, burstSignal (atSeconds (2.0), 0.05, 0.5f), {});
+            p.halo = 0.6f;
+            const auto verb = runFlip (p, burstSignal (atSeconds (2.0), 0.05, 0.5f), {});
+            const double after = energy (verb.l, atSeconds (0.47), atSeconds (0.62)), none = energy (dry.l, atSeconds (0.47), atSeconds (0.62));
+            expect (none < 1.0e-9 && after > 1.0e-4 && energy (verb.r, atSeconds (0.47), atSeconds (0.62)) > 1.0e-5,
+                    "Flip with Halo (Repeats fully left): the reversed echo swells into the reverb and the halo rings on after it stops, on both sides");
+        }
+
+        // ---- mono, host tail ----
+        {
+            mph::Params p = repeatsOnly (3, rateForDelay (3, 0.25));
+            p.flip = true;
+            const auto mono = runFlip (p, burstSignal (atSeconds (2.0), 0.05, 0.5f), {}, 1);
+            const Swell m = swellAround (mono.l, 0.45);
+            expect (m.before > 20.0 * m.after + 1.0e-9 && m.before > 1.0e-3, "Flip on a mono track: the echo is reversed too");
+        }
+        {
+            mph::Engine on, off;
+            on.prepare (kSr, 512, 2);
+            off.prepare (kSr, 512, 2);
+            mph::Params p = repeatsOnly (4, 0.5f, 0.6f);
+            p.flip = true;
+            on.setParams (p);
+            p.flip = false;
+            off.setParams (p);
+            const double chunk = core::freeDelaySeconds (4, 0.5f);
+            expect (std::fabs ((on.getTailSeconds() - off.getTailSeconds()) - chunk) < 1.0e-3, "Flip: Logic is told the tail is one chunk longer (the last echo is heard backwards after it)");
+        }
+
+        // ---- a click-free run: pressing and releasing Flip, chunk joins, and Zones changing while flipped ----
+        {
+            auto biggestStep = [] (const std::vector<float>& v, int from)
+            {
+                double m = 0.0;
+                for (int i = from + 1; i < (int) v.size(); ++i)
+                    m = std::max (m, (double) std::fabs (v[(size_t) i] - v[(size_t) i - 1]));
+                return m;
+            };
+            mph::Params p = repeatsOnly (3, rateForDelay (3, 0.35), 0.3f);
+            p.mix = 0.7f;
+            const auto presses = runFlip (p, sineSignal (atSeconds (5.0), 440.0, 0.3f), {}, 2, nullptr,
+                                          [] (int block, mph::Params& q) { q.flip = (block / 94) % 2 == 1; });         // on and off about every second
+            expect (biggestStep (presses.l, atSeconds (0.5)) < 0.06, "Flip pressed and released again and again under a tone: no click");
+            p.mix = 1.0f;
+            p.flip = true;
+            const auto joins = runFlip (p, sineSignal (atSeconds (6.0), 440.0, 0.3f), {});
+            expect (biggestStep (joins.l, atSeconds (0.5)) < 0.06, "Flip: the joins between chunks do not click (Zone 3)");
+            const auto zones = runFlip (p, sineSignal (atSeconds (6.0), 440.0, 0.3f), {}, 2, nullptr,
+                                        [] (int block, mph::Params& q) { static const int order[5] = { 3, 2, 4, 1, 5 }; q.zone = order[(block / 94) % 5]; });
+            expect (biggestStep (zones.l, atSeconds (0.5)) < 0.06, "Flip: Zone changes while it is on do not click (a new chunk with a crossfade)");
+            std::mt19937 zoneRng (5);
+            const auto fast = runFlip (p, sineSignal (atSeconds (3.0), 440.0, 0.3f), {}, 2, nullptr,
+                                       [&zoneRng] (int, mph::Params& q) { q.zone = (int) (zoneRng() % 8); });                // a new Zone every 10 ms
+            bool finite = true;
+            for (float v : fast.l)
+                finite = finite && std::isfinite (v) && std::fabs (v) < 2.0f;
+            expect (finite, "Flip: a new Zone every block stays finite and bounded");
+        }
+
+        // ---- the top of Zone 7: the chunk is held to what the memory can read backwards ----
+        {
+            mph::Params p = repeatsOnly (7, 1.0f);
+            p.flip = true;
+            const int total = atSeconds (44.0);
+            const auto out = runFlip (p, impulse (total, atSeconds (1.0), 0.5f), {});
+            const int want = 2 * (int) std::ceil (core::kFlipMaxChunkSeconds * kSr) - atSeconds (1.0);
+            const int peak = peakIndex (out.l, atSeconds (10.0), total);
+            expect (std::abs (peak - want) <= 3 && std::fabs (out.l[(size_t) peak]) > 0.2f,
+                    "Flip in Zone 7 at 41.8 s: the chunk is held to about 20.8 s (a click at 1 s is heard at about 40.7 s)");
+        }
+    }
+
+    void testFlipStability()
+    {
+        std::mt19937 rng (123);
+        std::uniform_real_distribution<float> noise (-0.5f, 0.5f), unit (0.0f, 1.0f);
+        bool finite = true, bounded = true;
+        for (int run = 0; run < 40; ++run)
+        {
+            const int channels = (run % 5 == 4) ? 1 : 2;
+            mph::Engine e;
+            e.prepare (kSr, 512, channels);
+            std::vector<float> l (512), r (512);
+            for (int block = 0; block < 120; ++block)
+            {
+                mph::Params p;
+                p.flip = (rng() % 3) != 0;
+                p.halo = unit (rng);
+                p.repeats = (run % 2 == 0) ? 1.0f : unit (rng);
+                p.color = unit (rng);
+                p.mix = unit (rng);
+                p.zone = (int) (rng() % 8);
+                p.rate = unit (rng);
+                p.skew = rng() & 1;
+                p.pingPong = rng() & 1;
+                p.tempoSync = rng() & 1;
+                p.uRate = unit (rng);
+                p.uRateLfoDepth = unit (rng);
+                p.uRateLfoRate = unit (rng);
+                p.clockDivision = (int) (rng() % 10);
+                p.inputGainStep = 3;
+                p.inputLevel = 1.0f;
+                p.clear = (rng() % 40) == 0;
+                mph::core::HostInfo host;
+                host.tempoValid = (rng() & 1) != 0;
+                host.bpm = 40.0 + 200.0 * (double) unit (rng);
+                e.setHost (host);
+                e.setParams (p);
+                for (size_t i = 0; i < l.size(); ++i) { l[i] = noise (rng); r[i] = noise (rng); }
+                float* chans[2] = { l.data(), r.data() };
+                e.process (chans, channels, 512);
+                for (size_t i = 0; i < l.size(); ++i)
+                {
+                    finite = finite && std::isfinite (l[i]) && std::isfinite (r[i]);
+                    bounded = bounded && std::fabs (l[i]) < 8.0f && std::fabs (r[i]) < 8.0f;
+                }
+            }
+        }
+        expect (finite && bounded, "Flip: 40 random runs (Flip on and off, every Zone, Skew, Ping Pong, Tempo Sync, uRate and its LFO, Halo, Clear, mono too) stay finite and bounded");
+
+        // The worst case for the reverse reader: the longest chunk, beyond-infinite Repeats, Halo fully right, uRate and its LFO at the far ends, for 50 seconds
+        {
+            mph::Engine e;
+            e.prepare (kSr, 512, 2);
+            mph::Params p;
+            p.flip = true;
+            p.zone = 7;
+            p.rate = 1.0f;
+            p.repeats = 1.0f;
+            p.halo = 1.0f;
+            p.uRate = 1.0f;
+            p.uRateLfoDepth = 1.0f;
+            p.inputGainStep = 3;
+            p.inputLevel = 1.0f;
+            double worst = 0.0;
+            bool ok = true;
+            std::vector<float> l (512), r (512);
+            for (int block = 0; block < (int) (kSr * 50.0) / 512; ++block)
+            {
+                for (size_t i = 0; i < l.size(); ++i) { l[i] = noise (rng); r[i] = noise (rng); }
+                float* chans[2] = { l.data(), r.data() };
+                e.setParams (p);
+                e.process (chans, 2, 512);
+                for (size_t i = 0; i < l.size(); ++i)
+                {
+                    ok = ok && std::isfinite (l[i]) && std::isfinite (r[i]);
+                    worst = std::max (worst, (double) std::max (std::fabs (l[i]), std::fabs (r[i])));
+                }
+            }
+            expect (ok && worst < 4.0, "Flip in Zone 7 at 41.8 s with beyond-infinite Repeats, Halo fully right, uRate and its LFO at the far ends, 50 s of loud noise: bounded");
+        }
+    }
 }
 
 int main()
@@ -2755,6 +3309,9 @@ int main()
     testHaloRules();
     testHaloSound();
     testHaloStability();
+    testFlipRules();
+    testFlipSound();
+    testFlipStability();
 
     std::printf ("engine tests: %d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;

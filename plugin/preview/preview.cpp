@@ -14,6 +14,8 @@
 //   6. checks saving and reloading, the Clear button switching itself off, and opening and closing the window while audio runs;
 //   7. (milestone 9) checks Halo: the card's words follow the engine's, and through the real processor Halo makes a tail with Repeats fully
 //      left and Mix fully right (Filter-Verb), is silent when fully left, and stays finite; picture styled_panel_halo.png.
+//   8. (milestone 10) checks Flip: the Delay box shows the length of the reversed chunk (and says FLIP), and through the real processor the echo
+//      is heard backwards (a click lands mirrored round the chunk start); picture styled_panel_flip.png.
 //
 // Usage: MimicPhonPreview <folder for the pictures>
 
@@ -21,6 +23,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include <mph/core/Color.h>
+#include <mph/core/Flip.h>
 #include <mph/core/Halo.h>
 
 #include <cmath>
@@ -929,6 +932,66 @@ int main (int argc, char** argv)
             expect (dark > 1.0e-4 && thin > 1.0e-5 && finite, "Halo works with the darkest and the thinnest Color");
         }
 
+        // ---- Flip (milestone 10): the Delay box shows the reversed chunk, and the echo is heard backwards ----
+        {
+            // A click at the start, Mix fully right, one echo: with Flip it comes back at twice the chunk (less twice the click's own position)
+            {
+                MimicPhonProcessor q;
+                fresh (q);
+                setParameter (q, MphParams::flip, 1.0f);
+                processSeconds (q, 0.1, 480);
+                MimicPhonEditor win (q);
+                win.setSize (1200, 800);
+                auto* pn = win.getStyledPanel();
+                if (pn != nullptr)
+                {
+                    pn->refreshNow();
+                    const auto r = pn->getReadout();
+                    expect (r.flipOn && r.delayLeft == "653 ms" && r.delayRight == "653 ms", "Flip on: the Delay box reads the chunk, 653 ms, and knows Flip is on");
+                    double left = -1, right = -1;
+                    echoTimes (q, left, right);
+                    // the click is at 0.1 s + 100 samples of the engine's own time, inside the first chunk: it is heard at twice (chunk - click time) after it
+                    const double want = 2.0 * (seconds (r.delayLeft) - 0.1 - 100.0 / 48000.0);
+                    expect (std::abs (left - want) < 0.003 && std::abs (right - want) < 0.003,
+                            "Flip: the click is heard backwards: at twice the time from the click to the end of the chunk the Delay box shows");
+                    setParameter (q, MphParams::flip, 0.0f);
+                    pn->refreshNow();
+                    expect (! pn->getReadout().flipOn, "Flip off: the read-out says so");
+                }
+            }
+
+            // The box shows the chunk that is heard: uRate does not shorten it in Zones 1-7, the top of Zone 7 is held to 20.8 s,
+            // Zone 0's uRate is a pitch (so it halves the chunk), Ping Pong's hop halves it
+            {
+                auto box = [] (const std::function<void (MimicPhonProcessor&)>& setup, bool flip)
+                {
+                    MimicPhonProcessor q;
+                    q.setPlayConfigDetails (2, 2, 48000.0, 512);
+                    q.prepareToPlay (48000.0, 512);
+                    resetAll (q);
+                    setup (q);
+                    setParameter (q, MphParams::flip, flip ? 1.0f : 0.0f);
+                    processSeconds (q, 0.1, 480);
+                    MimicPhonEditor win (q);
+                    win.setSize (1200, 800);
+                    auto* pn = win.getStyledPanel();
+                    if (pn == nullptr)
+                        return juce::String ("no panel");
+                    pn->refreshNow();
+                    return pn->getReadout().delayLeft;
+                };
+                auto uRateFar = [] (MimicPhonProcessor& q) { setParameter (q, MphParams::uRate, 1.0f); };
+                expect (box (uRateFar, false) == "647 ms" && box (uRateFar, true) == "653 ms", "Flip: uRate fully clockwise shortens the forward delay by 6 ms (647 ms) but not the chunk (653 ms)");
+                auto zone7 = [] (MimicPhonProcessor& q) { setParameter (q, MphParams::zone, 1.0f); setParameter (q, MphParams::rate, 1.0f); };
+                expect (box (zone7, false) == "41.8 s" && box (zone7, true) == "20.8 s", "Flip in Zone 7 with Rate fully right: the box reads 20.8 s (the chunk is held to what fits), not 41.8 s");
+                auto zone0 = [] (MimicPhonProcessor& q) { setParameter (q, MphParams::zone, 0.0f); setParameter (q, MphParams::uRate, 1.0f); };
+                expect (box (zone0, true) == box (zone0, false) && seconds (box (zone0, true)) > 0.0,
+                        "Flip in Zone 0: uRate is a pitch there, so the box follows it and is the same figure as without Flip");
+                auto ping = [] (MimicPhonProcessor& q) { setParameter (q, MphParams::pingPong, 1.0f); };
+                expect (std::abs (seconds (box (ping, true)) - 0.3265) < 0.001, "Flip with Ping Pong: the box reads the hop, half of 653 ms");
+            }
+        }
+
         // ---- Tempo Sync (milestone 8): the echo heard is the time the window shows ----
         {
             // Default Zone 4, Rate 1/1, 120 BPM assumed (no playhead here): 500 ms
@@ -1077,6 +1140,25 @@ int main (int argc, char** argv)
         processSeconds (haloProc, 0.3, 480);
         letWindowThreadRun (150);
         save (haloEditor, outDir.getChildFile ("styled_panel_halo.png"), 1.0f);
+    }
+
+    // ---------------- a picture with Flip on (its own plugin object): the Delay box says FLIP and shows the chunk ----------------
+    {
+        MimicPhonProcessor flipProc;
+        flipProc.setPlayConfigDetails (2, 2, 48000.0, 512);
+        flipProc.prepareToPlay (48000.0, 512);
+        resetAll (flipProc);
+        MimicPhonEditor flipEditor (flipProc);
+        flipEditor.showView (MimicPhonEditor::View::styled);
+        flipEditor.setSize (1200, 800);
+        setParameter (flipProc, MphParams::flip, 1.0f);
+        setParameter (flipProc, MphParams::zone, 3.0f / 7.0f);
+        setParameter (flipProc, MphParams::repeats, 0.55f);
+        setParameter (flipProc, MphParams::halo, 0.3f);
+        setParameter (flipProc, MphParams::uRate, 0.8f);
+        processSeconds (flipProc, 0.3, 480);
+        letWindowThreadRun (150);
+        save (flipEditor, outDir.getChildFile ("styled_panel_flip.png"), 1.0f);
     }
 
     // ---------------- the pictures ----------------
