@@ -3,7 +3,18 @@
 The detailed notes for each milestone, newest first. A version is listed as tested only after it has been tested in Logic on both
 test Macs (the M4 Mac mini and the Intel Mac) and worked as described. The README describes the current version.
 
-Version 0.9.0 (milestone 9, Halo; **not yet tested in Logic**). Halo now smears the repeats in stereo space.
+Version 0.10.0 (milestone 10, Flip; **not yet tested in Logic**). Flip now plays every repeat backwards.
+
+- **Flip** (`core/Flip.h`, new; `Engine`): a reverse reader per side plays the shared delay memory backwards in chunks as long as the delay time (delay grows from 0 to twice the chunk, speed exactly -1). The forward loop is untouched, so **every repeat is reversed, none alternate**; Repeats fully left = one reversed echo. Two overlapping heads join with a raised-cosine crossfade (a quarter of the chunk, 4 samples to 30 ms): in **Zones 0-1 the joins are a few samples = the protonic-reversal buzz**.
+- **No doppler from Rate** (the chunk length is latched when it starts); Zone, Tempo Sync, Skew and Ping Pong jumps restart the chunk with a crossfade; a long chunk (over 50 ms) restarts when Rate moves over about 25 %. **uRate and its LFO still bend** the reversed sound (Zones 1-7 move the reading point; Zone 0 sets the chunk length).
+- **Chunk capped at about 20.8 s** (the reader needs twice the chunk of the 41.8 s memory); only the top half of Zone 7 is affected and the Delay box shows the capped value.
+- **Flip off is bit for bit unchanged**; pressing / releasing crossfades in 10 ms. **Halo** works on the reversed sound (second DC blocker); the host tail adds one chunk. Color, Skew, Ping Pong, Tempo Sync and Clear keep working.
+- **Window:** Delay box **DELAY  FLIP** with the chunk length; plain window lists Flip. Version string 0.10.0.
+- **Milestone 9 finished:** 0.9.0 tested in Logic on both Macs on 7 November 2026 ("sounds terrific").
+- Engine self-test now 527 checks (41 new), clean under ASan/UBSan; preview 305 (8 new). GitHub run #22, commit 2564452, both jobs green (universal, auval, pluginval 5). **No control id changed** (21).
+- Not in this version: Hold (milestone 11). Not replicated: Flip dropping an octave in Zones 0-1.
+
+Version 0.9.0 (milestone 9, Halo; **tested in Logic on both Macs on 7 November 2026: worked as described**). Halo now smears the repeats in stereo space.
 
 - **Halo** (`core/Halo.h`, new; `Engine`): stereo diffusion of the repeat that is heard. The repeat read from the delay memory (DC taken out) goes through an optional high-pass, **four allpass diffusers per side**, and a **feedback tank per side** (a delay line, a damping low-pass in the loop, and a **lossless rotation between left and right** in the loop, which is what widens the image). Everything grows with the knob: **fully left = nothing at all, bit for bit** (a small dead zone, 0.004); **middle = a tight, string-like reverb** (tank line about 17 ms, loop gain about 0.63); **fully right = a big, wide hall** (tank line 60 ms on the left, 68 ms on the right, loop gain 0.88, rotation about 65 degrees). The loop gain never reaches 0.9 and the rotation loses nothing, so the halo always dies away by itself (under -60 dB after 7 s at the far end).
 - **It works with Repeats fully left and Mix fully right (the Filter-Verb patch)**, because Halo acts on the repeat that is heard, not only on what is fed back. At full level the repeat itself is turned down by half and the halo is added (`core::haloMix`). In Zone 0 with one echo it is almost a reverb on the input.
