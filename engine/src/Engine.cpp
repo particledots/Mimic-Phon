@@ -65,6 +65,17 @@ void Engine::prepare (double newSampleRate, int newMaxBlockSize, int newNumChann
     }
     flipAmount.snap (0.0);
     flipWasActive = false;
+    holdColorFilter.prepare (sampleRate);
+    holdAmount.snap (0.0);
+    holdSoft.snap (0.0);
+    holdSwap.snap (0.0);
+    holdSwapSide = false;
+    holdOn = false;
+    holdWasActive = false;
+    holdEnd = 0;
+    for (int c = 0; c < 2; ++c)
+        holdHeads[c][0] = holdHeads[c][1] = core::HoldHead();
+    holdScrubCoefficient = onePoleCoefficient (core::kHoldScrubGlideSeconds, sampleRate);
 
     levelRelease = onePoleCoefficient (kLevellerReleaseSeconds, sampleRate);
     envRelease = (float) std::exp (-1.0 / (kLevellerReleaseSeconds * sampleRate));
@@ -146,7 +157,10 @@ void Engine::publishTargets()
     feedbackShown.store (fb);
     // Flip: the last echo is heard backwards one chunk after it, so the tail is one chunk longer
     const double flipExtra = params.flip ? std::min (core::kFlipMaxChunkSeconds, std::max (sides.left, sides.right)) : 0.0;
-    tailShown.store ((float) (core::tailSeconds (std::max (sides.left, sides.right), fb) + core::haloTailSeconds (params.halo) + flipExtra));
+    // Hold: the loop never dies away, so the host is told the longest tail it will accept
+    const double tail = params.hold ? core::kTailCapSeconds
+                                    : core::tailSeconds (std::max (sides.left, sides.right), fb) + core::haloTailSeconds (params.halo) + flipExtra;
+    tailShown.store ((float) tail);
     skewEngagedShown.store (skew.engaged);
     skewSkewedShown.store (skew.skewed);
     skewCentreShown.store (skew.centre);
@@ -162,6 +176,7 @@ void Engine::clearRepeats()
     for (int c = 0; c < 2; ++c)
         dcIn[c] = dcOut[c] = dcInH[c] = dcOutH[c] = levelEnv[c] = 0.0f, levelGain[c] = 1.0f;
     colorFilter.reset();
+    holdColorFilter.reset();
     halo.reset();
 }
 
@@ -259,6 +274,32 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
     const double logLive[2] = { std::log (sides.left), std::log (sides.right) };
     const bool skewJump = skew.takeJump();
     bool restartFlip = false;
+
+    // Hold (milestone 11): the button as of this block, where each side's loop should start, and whether that asks for a crossfaded jump
+    const bool holdNow = params.hold;
+    const bool holdPress = holdNow && ! holdOn;
+    const double holdCapSamples = core::kHoldMaxLoopSeconds * sampleRate;
+    auto holdLoopClamp = [&] (double samples) { return std::min (holdCapSamples, std::max (core::kHoldMinLoopSamples, samples)); };
+    auto holdStartTarget = [&] (int zone, double loopSamples)
+    {
+        return core::holdStartSeconds (params.repeats, zone, loopSamples / sampleRate) * sampleRate;
+    };
+    bool holdPressJump = false, holdScrubJump = false;
+    if (started && holdNow)
+    {
+        const int audible = fading ? 1 - current : current;
+        for (int c = 0; c < channelCount; ++c)
+        {
+            const double loop = holdLoopClamp ((c == 0 ? sides.left : sides.right) * sampleRate);
+            if (holdPress)
+            {
+                if (holdStartTarget (params.zone, loop) > core::kHoldPressJumpSeconds * sampleRate)
+                    holdPressJump = true;
+            }
+            else if (std::fabs (holdStartTarget (headZone[audible], loop) - holdHeads[c][audible].s) > core::kHoldScrubJumpSeconds * sampleRate)
+                holdScrubJump = true;
+        }
+    }
     // Tempo Sync: which step each side is on (and which clock). A change is a jump in time, crossfaded like a Zone change.
     SyncKey syncKey;
     if (kTempoSyncAudible && params.tempoSync)
@@ -271,6 +312,8 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
     }
     const bool syncJump = started && syncKey != lastSyncKey;
     lastSyncKey = syncKey;
+    const bool genericJump = started && (params.zone != lastZone || pingHopNow != lastPingHop || skewJump || syncJump);
+    bool jumpRan = false;
     if (! started)
     {
         inputGain.snap (inputGain.target);
@@ -303,8 +346,9 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
         lastPingHop = pingHopNow;
         started = true;
     }
-    else if (params.zone != lastZone || pingHopNow != lastPingHop || skewJump || syncJump)
+    else if (genericJump || holdPressJump || holdScrubJump)
     {
+        jumpRan = true;
         lastZone = params.zone;
         lastPingHop = pingHopNow;
         for (int c = 0; c < 2; ++c)
@@ -329,6 +373,71 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
         }
         else
             heads[c][current].logTarget = logLive[c];
+    }
+
+    // Hold: pressing freezes the memory and starts the loops where the delay was reading (so no click); releasing lets go
+    if (holdPress)
+    {
+        holdOn = true;
+        holdEnd = buffers[0].writeIndex();
+        for (auto& b : buffers)
+            b.freeze();
+        holdAmount.snap (1.0);                       // the loop carries on exactly where the delay was reading
+        holdSoft.target = 1.0;                       // Color on the loop and the reversed loop fade in over about 10 ms
+        holdSwap.snap (0.0);
+        holdSwapSide = false;
+        holdColorFilter.setShape (core::colorShape (colorApplied));
+        holdColorFilter.reset();
+        const double zeroFactor = (uRateKnob.value != 0.0 || lfoSeconds.value != 0.0 || lfoSemitones.value != 0.0)
+                                      ? std::exp2 (-(uRateKnob.value * core::kURateKnobMaxSemitones + lfoSmoothed * lfoSemitones.value) / 12.0)
+                                      : 1.0;
+        for (int c = 0; c < 2; ++c)
+            holdHeads[c][0] = holdHeads[c][1] = core::HoldHead();
+        for (int c = 0; c < channelCount; ++c)
+        {
+            const int outgoing = current;
+            double loop = holdLoopClamp (std::exp (heads[c][outgoing].logDelay) * sampleRate);
+            holdHeads[c][outgoing].u = headZone[outgoing] == 0 ? loop * zeroFactor : loop;      // Zone 0: the loop is the pitch-bent length
+            if (fading)
+            {
+                const int incoming = 1 - outgoing;
+                loop = holdLoopClamp (std::exp (heads[c][incoming].logDelay) * sampleRate);
+                holdHeads[c][incoming].u = loop;
+                holdHeads[c][incoming].s = holdStartTarget (headZone[incoming], loop);
+            }
+        }
+    }
+    else if (! holdNow && holdOn)
+    {
+        holdOn = false;
+        for (auto& b : buffers)
+            b.unfreeze();
+        holdAmount.target = 0.0;                     // back to the live repeat over about 10 ms
+        holdSoft.target = 0.0;
+        for (int c = 0; c < 2; ++c)
+            flipVoices[c].reset();
+    }
+    else if (holdOn && jumpRan)
+    {
+        // A jump while held (Zone, Rate step, Skew, Ping Pong hop, Tempo Sync, or a far move of Repeats): the incoming loop starts at its
+        // beginning (or, for a far move of Repeats only, at the same place in the loop, so the rhythm stays) and at the new start point
+        const int incoming = 1 - current;
+        for (int c = 0; c < channelCount; ++c)
+        {
+            core::HoldHead& hh = holdHeads[c][incoming];
+            const double loop = holdLoopClamp (std::exp (heads[c][incoming].logDelay) * sampleRate);
+            if (genericJump)
+            {
+                hh.u = loop;
+                hh.ur = 0.0;
+            }
+            else
+            {
+                hh.u = holdHeads[c][current].u;
+                hh.ur = holdHeads[c][current].ur;
+            }
+            hh.s = holdStartTarget (headZone[incoming], loop);
+        }
     }
 
     const double minDelay = dsp::DelayBuffer::kMinDelaySamples;
@@ -362,6 +471,8 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
                 colorApplied = colorNow;
                 const core::ColorShape shapeNow = core::colorShape (colorNow);
                 colorFilter.setShape (shapeNow);
+                if (holdOn || holdWasActive)
+                    holdColorFilter.setShape (shapeNow);        // and the filter on the held loop
                 halo.setTimbre (shapeNow);          // Color also sets Halo's timbre
             }
         }
@@ -369,13 +480,19 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
         const float crossG = crossing.next (rampCoefficient), monoG = monoSum.next (rampCoefficient);
         const float flipG = flipAmount.next (rampCoefficient);
         const bool flipActive = flipAmount.value > 0.0 || flipAmount.target > 0.0;
-        if (flipActive && ! flipWasActive)
+        const float holdG = holdAmount.next (rampCoefficient), holdS = holdSoft.next (rampCoefficient), swapG = holdSwap.next (rampCoefficient);
+        const bool holdActive = holdAmount.value > 0.0 || holdAmount.target > 0.0;
+        if ((flipActive || holdActive) && ! (flipWasActive || holdWasActive))
             for (int c = 0; c < 2; ++c)
                 dcInH[c] = dcIn[c], dcOutH[c] = dcOut[c];                  // the second DC blocker starts where the first one is
-        else if (! flipActive && flipWasActive)
+        if (! flipActive && flipWasActive)
             for (int c = 0; c < 2; ++c)
                 flipVoices[c].reset();                                      // the reversed sound has faded out: the readers rest
+        if (! holdActive && holdWasActive)
+            holdColorFilter.reset();                                        // the loop has faded out
         flipWasActive = flipActive;
+        holdWasActive = holdActive;
+        const bool heldFully = holdOn && holdS >= 1.0f;                     // the flip readers rest while the loop is all that is heard
 
         // uRate and its LFO: one offset for the sample, added to each read point's own (glided) time below
         uRateKnob.next (rampCoefficient);
@@ -400,17 +517,103 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
 
         // Each side's read point(s)
         double delayCurrent[2] = { minDelay, minDelay }, delayIncoming[2] = { minDelay, minDelay };
+        double baseCurrent[2] = { minDelay, minDelay }, baseIncoming[2] = { minDelay, minDelay };      // the same times before uRate (the held loop's length)
         for (int c = 0; c < channelCount; ++c)
         {
             Head& hc = heads[c][current];
             hc.logDelay += (hc.logTarget - hc.logDelay) * (double) delayCoefficient;
-            delayCurrent[c] = std::min (maxDelay, std::max (minDelay, modulated (headZone[current], std::exp (hc.logDelay), c) * sampleRate));
+            const double secondsCurrent = std::exp (hc.logDelay);
+            baseCurrent[c] = secondsCurrent * sampleRate;
+            delayCurrent[c] = std::min (maxDelay, std::max (minDelay, modulated (headZone[current], secondsCurrent, c) * sampleRate));
             delayIncoming[c] = delayCurrent[c];
             if (fading)
             {
                 Head& hi = heads[c][1 - current];
                 hi.logDelay += (hi.logTarget - hi.logDelay) * (double) delayCoefficient;
-                delayIncoming[c] = std::min (maxDelay, std::max (minDelay, modulated (headZone[1 - current], std::exp (hi.logDelay), c) * sampleRate));
+                const double secondsIncoming = std::exp (hi.logDelay);
+                baseIncoming[c] = secondsIncoming * sampleRate;
+                delayIncoming[c] = std::min (maxDelay, std::max (minDelay, modulated (headZone[1 - current], secondsIncoming, c) * sampleRate));
+            }
+        }
+
+        // Hold (milestone 11): the held loop of each side, forwards (and backwards under Flip), then every loop's phase moves on one sample.
+        // Ping Pong / Swap: the two sides trade places on every pass of the left loop.
+        const bool stereoHold = numChannels == 2 && channelCount == 2;
+        float loopFwd[2] = { 0.0f, 0.0f }, loopRev[2] = { 0.0f, 0.0f };
+        if (holdActive)
+        {
+            for (int c = 0; c < channelCount; ++c)
+            {
+                auto headValue = [&] (int h, double baseSamples, bool backwards)
+                {
+                    const core::HoldHead& hh = holdHeads[c][h];
+                    double length = baseSamples, offset = 0.0;
+                    if (modulating)
+                    {
+                        if (headZone[h] == 0)
+                            length *= std::exp2 (-(knobNow * core::kURateKnobMaxSemitones + lfoSmoothed * lfoSemitones.value) / 12.0);     // Zone 0: pitch
+                        else
+                            offset = (c == 1 ? rightSide.value : 1.0) * (knobNow * core::kURateKnobMaxSeconds + lfoSmoothed * lfoSeconds.value) * sampleRate;
+                    }
+                    length = holdLoopClamp (length);
+                    return core::holdLoopValue (buffers[c], (double) holdEnd - hh.s, backwards ? hh.ur + offset : hh.u - offset, length,
+                                                core::holdFadeSamples (length, sampleRate));
+                };
+                loopFwd[c] = headValue (current, baseCurrent[c], false);
+                if (fading)
+                    loopFwd[c] += fadePosition * (headValue (1 - current, baseIncoming[c], false) - loopFwd[c]);
+                if (flipActive)
+                {
+                    loopRev[c] = headValue (current, baseCurrent[c], true);
+                    if (fading)
+                        loopRev[c] += fadePosition * (headValue (1 - current, baseIncoming[c], true) - loopRev[c]);
+                }
+            }
+            bool leftWrapped = false;
+            for (int c = 0; c < channelCount; ++c)
+            {
+                auto advance = [&] (int h, double baseSamples)
+                {
+                    core::HoldHead& hh = holdHeads[c][h];
+                    const double length = holdLoopClamp (baseSamples);
+                    bool wrapped = false;
+                    hh.u -= 1.0;
+                    if (hh.u < 0.0)
+                    {
+                        hh.u += length;
+                        wrapped = true;
+                    }
+                    if (hh.u > length)
+                        hh.u = std::fmod (hh.u, length);
+                    hh.ur += 1.0;
+                    if (hh.ur >= length)
+                        hh.ur -= length;
+                    if (hh.ur >= length)
+                        hh.ur = std::fmod (hh.ur, length);
+                    // the start point follows Repeats (a small move glides; a far one was a jump), and stays inside the memory;
+                    // the read point that is fading out keeps its start point (it must not run while it goes)
+                    if (! (fading && h == current))
+                        hh.s += (holdStartTarget (headZone[h], length) - hh.s) * (double) holdScrubCoefficient;
+                    hh.s = std::min (hh.s, std::max (0.0, holdCapSamples - length));
+                    return wrapped;
+                };
+                if (advance (current, baseCurrent[c]) && c == 0)
+                    leftWrapped = true;
+                if (fading)
+                    advance (1 - current, baseIncoming[c]);
+            }
+            if (holdOn && stereoHold && crossing.target > 0.5)
+            {
+                if (leftWrapped)
+                {
+                    holdSwapSide = ! holdSwapSide;
+                    holdSwap.target = holdSwapSide ? 1.0 : 0.0;
+                }
+            }
+            else
+            {
+                holdSwapSide = false;
+                holdSwap.target = 0.0;
             }
         }
 
@@ -425,9 +628,27 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
                 x[c] = 0.0f;                                       // a bad sample must never get into the feedback
             x[c] *= inG;
 
-            wet[c] = buffers[c].read (delayCurrent[c]);
-            if (fading)
-                wet[c] += fadePosition * (buffers[c].read (delayIncoming[c]) - wet[c]);
+            if (holdActive)
+            {
+                // Hold: the loop (and, for a few ms after Hold is released, the live repeat fading back in)
+                float loop = loopFwd[c];
+                if (stereoHold && crossG > 0.0f && swapG > 0.0f)
+                    loop += crossG * swapG * (loopFwd[1 - c] - loop);
+                float live = 0.0f;
+                if (holdG < 1.0f)
+                {
+                    live = buffers[c].read (delayCurrent[c]);
+                    if (fading)
+                        live += fadePosition * (buffers[c].read (delayIncoming[c]) - live);
+                }
+                wet[c] = live + holdG * (loop - live);
+            }
+            else
+            {
+                wet[c] = buffers[c].read (delayCurrent[c]);
+                if (fading)
+                    wet[c] += fadePosition * (buffers[c].read (delayIncoming[c]) - wet[c]);
+            }
 
             // The repeat minus any DC (what is fed back, and what Halo works on)
             float b = wet[c] - dcIn[c] + dcCoefficient * dcOut[c];
@@ -459,15 +680,42 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
                         seconds = modulated (0, seconds, c);
                     return std::min (core::kFlipMaxChunkSeconds * sampleRate, std::max (core::kFlipMinChunkSamples, seconds * sampleRate));
                 };
-                const float reversed = flipVoices[c].process (buffers[c], offsetSamples, minDelay, maxDelay, chunk);
+                float reversed = heldFully ? 0.0f : flipVoices[c].process (buffers[c], offsetSamples, minDelay, maxDelay, chunk);
+                if (holdActive)
+                {
+                    // Hold: the reversed sound is the held loop played backwards (the chunk reader fades out as the loop fades in)
+                    float backwards = loopRev[c];
+                    if (stereoHold && crossG > 0.0f && swapG > 0.0f)
+                        backwards += crossG * swapG * (loopRev[1 - c] - backwards);
+                    reversed += holdS * (backwards - reversed);
+                }
                 heardWet[c] = wet[c] + flipG * (reversed - wet[c]);
-                // Halo works on the reversed sound that is heard (its own DC blocker; flipG = 0 gives exactly the forward repeat's)
+                if (! holdActive)
+                {
+                    // Halo works on the reversed sound that is heard (its own DC blocker; flipG = 0 gives exactly the forward repeat's)
+                    float bh = heardWet[c] - dcInH[c] + dcCoefficient * dcOutH[c];
+                    dcInH[c] = heardWet[c];
+                    if (std::fabs (bh) < 1.0e-20f)
+                        bh = 0.0f;
+                    dcOutH[c] = bh;
+                    haloIn[c] = blocked[c] + flipG * (bh - blocked[c]);
+                }
+            }
+        }
+
+        // Hold: Color shapes the loop that is heard (not written into the memory), and Halo works on that
+        if (holdActive)
+        {
+            for (int c = 0; c < channelCount; ++c)
+            {
+                const float coloured = holdColorFilter.process (c, heardWet[c]);
+                heardWet[c] += holdS * (coloured - heardWet[c]);
                 float bh = heardWet[c] - dcInH[c] + dcCoefficient * dcOutH[c];
                 dcInH[c] = heardWet[c];
                 if (std::fabs (bh) < 1.0e-20f)
                     bh = 0.0f;
                 dcOutH[c] = bh;
-                haloIn[c] = blocked[c] + flipG * (bh - blocked[c]);
+                haloIn[c] = blocked[c] + std::max (flipG, holdS) * (bh - blocked[c]);
             }
         }
 
@@ -477,7 +725,7 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
         const float haloLevel = haloOn ? halo.level() : 0.0f;
         const float haloInject = haloOn ? halo.injection() : 0.0f;
 
-        for (int c = 0; c < channelCount; ++c)
+        for (int c = 0; c < channelCount && ! holdOn; ++c)         // (Hold: nothing is fed back)
         {
             // What is fed back: the repeat (and, at high Halo settings, its halo), scaled by Repeats, kept from running away by the leveller
             // and the soft limiter.
@@ -497,16 +745,21 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
         {
             // What goes in: the live signal (Ping Pong: both inputs summed to mono, into the left side only) plus the fed-back repeat
             // (Ping Pong and Swap: the other side's repeat), shaped by Color (exactly untouched at unity).
-            float live = x[c];
-            float returned = fedBack[c];
-            if (stereoRouting)
+            if (holdOn)
+                buffers[c].advanceFrozen();                        // Hold: the input is ignored and the memory stays as it is
+            else
             {
-                if (monoG > 0.0f)
-                    live = c == 0 ? x[0] + monoG * (0.5f * (x[0] + x[1]) - x[0]) : x[1] * (1.0f - monoG);
-                if (crossG > 0.0f)
-                    returned = fedBack[c] + crossG * (fedBack[1 - c] - fedBack[c]);
+                float live = x[c];
+                float returned = fedBack[c];
+                if (stereoRouting)
+                {
+                    if (monoG > 0.0f)
+                        live = c == 0 ? x[0] + monoG * (0.5f * (x[0] + x[1]) - x[0]) : x[1] * (1.0f - monoG);
+                    if (crossG > 0.0f)
+                        returned = fedBack[c] + crossG * (fedBack[1 - c] - fedBack[c]);
+                }
+                buffers[c].write (colorFilter.process (c, live + returned));
             }
-            buffers[c].write (colorFilter.process (c, live + returned));
 
             const float heard = haloOn ? core::haloMix (heardWet[c], haloOut[c], haloLevel) : heardWet[c];
             channels[c][n] = (dryG * x[c] + wetG * heard) * outG;

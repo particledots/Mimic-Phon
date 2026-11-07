@@ -8,6 +8,10 @@
 // "Clear" does not wipe the memory (that would take a noticeable moment with a buffer this long, and the audio thread must
 // never stall). It notes the moment of clearing instead: anything written before that moment reads as silence from then on.
 // The result is the same as wiping every Zone at once, instantly.
+//
+// Hold (milestone 11) freezes the memory: nothing is written, and a "virtual" clock keeps counting, so every reader that works
+// relative to the write point (the delay read, Flip's reverse reader) goes on as if time still passed. The held loop is read at
+// absolute positions (readAt), so it does not care about that clock. Off, none of this changes a single sample.
 
 #pragma once
 
@@ -45,11 +49,24 @@ namespace mph::dsp
         // Everything written so far now reads as silence.
         void clearAll() { clearedAt = writeCount; }
 
+        // Hold: the memory stops where it is. advanceFrozen() is called once per sample instead of write().
+        void freeze() { ahead = 0; }
+        void advanceFrozen() { ++ahead; }
+        void unfreeze() { ahead = 0; }
+        // How many samples have been written since prepare() (the position the next write will get).
+        std::int64_t writeIndex() const { return writeCount; }
+
         // The sound that went in "delaySamples" ago (1 = the sample just written), between samples if need be.
         // Call before write() for the current sample. delaySamples must be between kMinDelaySamples and maxDelaySamples().
         float read (double delaySamples) const
         {
-            const double position = (double) writeCount - delaySamples;
+            return readAt ((double) (writeCount + ahead) - delaySamples);
+        }
+
+        // The sound at an absolute position (the sample index since prepare(), between samples if need be). Positions at or after the
+        // write point read as silence. Used by the held loop.
+        float readAt (double position) const
+        {
             const double whole = std::floor (position);
             const std::int64_t i = (std::int64_t) whole;
             const float f = (float) (position - whole);
@@ -64,12 +81,13 @@ namespace mph::dsp
     private:
         float tap (std::int64_t absoluteIndex) const
         {
-            return absoluteIndex >= clearedAt ? memory[(size_t) (absoluteIndex % length)] : 0.0f;
+            return absoluteIndex >= clearedAt && absoluteIndex < writeCount ? memory[(size_t) (absoluteIndex % length)] : 0.0f;
         }
 
         std::vector<float> memory;
         int length = 64;
         std::int64_t writeCount = 0;       // how many samples have been written since prepare()
         std::int64_t clearedAt = 0;        // samples with a smaller absolute index than this read as silence
+        std::int64_t ahead = 0;            // Hold: samples of virtual time since the memory froze (0 whenever Hold is off)
     };
 }

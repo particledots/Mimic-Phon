@@ -6,6 +6,7 @@
 // milestone 8 adds Tempo Sync of Rate: the clock, the 13 steps heard, Zones, Clock Division, tempo, Skew sides, jumps instead of glides, stability;
 // milestone 9 adds Halo: the rules, off bit for bit, the halo with Repeats fully left (Filter-Verb), size and tail, width, Color's timbre, no run-away;
 // milestone 10 adds Flip: the rules, off bit for bit, every repeat reversed, chunk length, no doppler from Rate, uRate still bends, Skew / Ping Pong / Tempo Sync / Clear / Color / Halo with Flip, stability).
+// milestone 11 adds Hold: the rules, no click or jump on press, the input ignored, the loop as long as the delay and seamless, Repeats scrubbing the start point, release, no doppler from Rate, Tempo Sync, Color / Halo / Flip / Skew / Ping Pong / uRate / Clear / Zone with Hold, mono, host tail, stability).
 // Prints "engine tests: N checks, F failed" and exits with 0 only if nothing failed.
 
 #include <mph/Engine.h>
@@ -14,6 +15,7 @@
 #include <mph/core/Flip.h>
 #include <mph/core/Gain.h>
 #include <mph/core/Halo.h>
+#include <mph/core/Hold.h>
 #include <mph/core/HostClock.h>
 #include <mph/core/Skew.h>
 #include <mph/core/URate.h>
@@ -3276,6 +3278,501 @@ namespace
             expect (ok && worst < 4.0, "Flip in Zone 7 at 41.8 s with beyond-infinite Repeats, Halo fully right, uRate and its LFO at the far ends, 50 s of loud noise: bounded");
         }
     }
+    // ======================= milestone 11: Hold =======================
+
+    // The most a signal moves from one sample to the next in [from, to)
+    double maxStep (const std::vector<float>& v, int from, int to)
+    {
+        double worst = 0.0;
+        for (int i = std::max (1, from); i < to && i < (int) v.size(); ++i)
+            worst = std::max (worst, std::fabs ((double) v[(size_t) i] - (double) v[(size_t) i - 1]));
+        return worst;
+    }
+
+    // The block at which a time falls (the settings change at the start of a block, so presses are made on block boundaries)
+    int blockAt (double seconds) { return (int) std::lround (seconds * kSr / 512.0); }
+    int sampleOfBlock (int block) { return block * 512; }
+
+    // The mean of a signal over [from, to)
+    double meanOf (const std::vector<float>& v, int from, int to)
+    {
+        double sum = 0.0;
+        for (int i = from; i < to; ++i)
+            sum += (double) v[(size_t) i];
+        return sum / (double) (to - from);
+    }
+
+    void testHoldRules()
+    {
+        using namespace mph;
+        expect (core::holdLoopSeconds (0.5) == 0.5 && core::holdLoopSeconds (-1.0) == 0.0, "Hold: the loop is as long as the delay time");
+        expect (core::holdLoopSeconds (41.796) < 41.796 && core::holdLoopSeconds (41.796) > 41.7, "Hold: a delay of the whole memory is held to what the memory can keep (41.76 s)");
+        expect (core::holdStartSeconds (0.0f, 4, 0.5) == 0.0, "Hold: Repeats fully left = the loop is the newest stretch (start 0)");
+        expect (std::fabs (core::holdStartSeconds (1.0f, 4, 0.5) - (1.306 - 0.5)) < 1.0e-9, "Hold: Repeats fully right = as far back as Zone 4 reaches (1.306 s) minus the loop");
+        expect (std::fabs (core::holdStartSeconds (0.5f, 4, 0.5) - 0.5 * (1.306 - 0.5)) < 1.0e-9, "Hold: Repeats half way = half way back");
+        expect (core::holdStartSeconds (1.0f, 4, 1.306) == 0.0 && core::holdStartSeconds (1.0f, 4, 2.0) == 0.0, "Hold: a loop as long as the Zone leaves nothing to scrub");
+        expect (core::holdStartSeconds (1.0f, 7, 1.0) > 40.0 && core::holdStartSeconds (1.0f, 7, 1.0) < 41.0, "Hold: in Zone 7 Repeats scrubs through about 40 s of stored sound");
+        expect (core::holdStartSeconds (1.0f, 0, 0.005) < 0.0204 - 0.005 + 1.0e-9 && core::holdStartSeconds (1.0f, 0, 0.005) > 0.015, "Hold: in Zone 0 the scrub is a few milliseconds");
+        bool rising = true;
+        double last = -1.0;
+        for (int i = 0; i <= 20; ++i)
+        {
+            const double s = core::holdStartSeconds ((float) i / 20.0f, 5, 0.8);
+            rising = rising && s >= last;
+            last = s;
+        }
+        expect (rising, "Hold: turning Repeats right only moves the start back");
+        expect (core::holdFadeSamples (48000.0, kSr) == 0.030 * kSr && core::holdFadeSamples (100.0, kSr) == 25.0 && core::holdFadeSamples (8.0, kSr) == 4.0,
+                "Hold: the loop seam is a quarter of the loop, between 4 samples and 30 ms");
+
+        // the loop function repeats and has no jump at the seam, in either direction (a ramp stored in a buffer)
+        dsp::DelayBuffer b;
+        b.prepare (48000);
+        for (int i = 0; i < 40000; ++i)
+            b.write (1.0e-5f * (float) i);
+        const double end = 30000.0, length = 5000.0, fade = 400.0;
+        const double atSeam0 = core::holdLoopValue (b, end, 0.0, length, fade), atSeam1 = core::holdLoopValue (b, end, length, length, fade);
+        expect (std::fabs (atSeam0 - atSeam1) < 1.0e-6, "Hold: the loop function has the same value at its end and its start");
+        // a stored ramp is the hardest sound for a seam (its end and its start are far apart): the step at the wrap itself is the ramp's own slope,
+        // and inside the crossfade the output slides from the end's level to the start's level (0.05 over 400 samples), never faster than that
+        const double wrapStep = std::fabs (core::holdLoopValue (b, end, 3.0 * length, length, fade) - core::holdLoopValue (b, end, 3.0 * length - 1.0, length, fade));
+        double worstStep = 0.0;
+        for (double v = 3.0 * length - 500.0; v < 3.0 * length + 500.0; v += 1.0)
+            worstStep = std::max (worstStep, (double) std::fabs (core::holdLoopValue (b, end, v + 1.0, length, fade) - core::holdLoopValue (b, end, v, length, fade)));
+        expect (wrapStep < 1.5e-5, "Hold: no jump where the loop wraps (the step is the stored ramp's own slope)");
+        expect (worstStep < 2.5e-4, "Hold: the seam is a smooth slide, never a jump");
+        expect (std::fabs (core::holdLoopValue (b, end, 123.0, length, fade) - core::holdLoopValue (b, end, 123.0 + 7.0 * length, length, fade)) < 1.0e-6,
+                "Hold: the loop function repeats every loop length");
+    }
+
+    void testHoldSound()
+    {
+        using namespace mph;
+        std::mt19937 rng (111);
+        std::uniform_real_distribution<float> noise (-0.5f, 0.5f);
+        auto noiseOf = [&] (int length) { std::vector<float> v ((size_t) length); for (auto& x : v) x = noise (rng); return v; };
+
+        // ---- pressing makes no click and no jump: the loop carries on exactly where the delay was reading ----
+        {
+            const double delay = 0.25;
+            const int total = atSeconds (2.0);
+            mph::Params p = repeatsOnly (3, rateForDelay (3, delay));
+            const auto input = noiseOf (total);
+            const auto never = runFlip (p, input, input);
+            const int pressBlock = blockAt (1.2);
+            const auto held = runFlip (p, input, input, 2, nullptr, [pressBlock] (int block, mph::Params& q) { q.hold = block >= pressBlock; });
+            const int press = sampleOfBlock (pressBlock);
+            const bool sameBefore = std::memcmp (never.l.data(), held.l.data(), (size_t) press * sizeof (float)) == 0;
+            double worst = 0.0;
+            for (int i = press; i < press + atSeconds (0.2); ++i)
+                worst = std::max (worst, (double) std::fabs (never.l[(size_t) i] - held.l[(size_t) i]));
+            expect (sameBefore, "Hold never pressed: the output is bit for bit what it was before milestone 11 (same until the press)");
+            expect (worst < 1.0e-5, "Hold: pressing makes no jump and no click: the next 200 ms are the delay's own (the loop carries on from the very sample)");
+        }
+
+        // ---- the input is ignored and nothing is fed back: new sound after the press changes nothing ----
+        {
+            const int total = atSeconds (3.0);
+            mph::Params p = repeatsOnly (3, rateForDelay (3, 0.4), 0.7f);
+            p.color = 0.4f;
+            const int pressBlock = blockAt (1.0);
+            auto first = noiseOf (atSeconds (1.0));
+            auto quietAfter = first, loudAfter = first;
+            quietAfter.resize ((size_t) total, 0.0f);
+            for (int i = (int) first.size(); i < total; ++i)
+                loudAfter.push_back (4.0f * noise (rng));
+            auto change = [pressBlock] (int block, mph::Params& q) { q.hold = block >= pressBlock; };
+            const auto a = runFlip (p, quietAfter, quietAfter, 2, nullptr, change);
+            const auto b = runFlip (p, loudAfter, loudAfter, 2, nullptr, change);
+            const int press = sampleOfBlock (pressBlock);
+            double worstDifference = 0.0;
+            for (int i = press; i < total; ++i)
+                worstDifference = std::max (worstDifference, (double) std::max (std::fabs (a.l[(size_t) i] - b.l[(size_t) i]), std::fabs (a.r[(size_t) i] - b.r[(size_t) i])));
+            expect (worstDifference < 1.0e-6, "Hold: the input is ignored (loud new sound after the press changes nothing; Mix fully right still lets 1e-7 of the dry through)");
+            expect (energy (a.l, atSeconds (2.0), atSeconds (3.0)) > 1.0, "Hold: the loop keeps sounding (it never dies away, whatever Repeats says)");
+        }
+
+        // ---- the loop is as long as the delay time, and it repeats seamlessly ----
+        for (int zone = 2; zone <= 5; ++zone)
+        {
+            const double delay = zone == 2 ? 0.2 : zone == 3 ? 0.4 : zone == 4 ? 0.8 : 1.6;       // whole numbers of samples
+            const int total = atSeconds (delay * 9.0 + 2.0);
+            mph::Params p = repeatsOnly (zone, rateForDelay (zone, delay));
+            const int pressBlock = blockAt (delay * 1.5 + 0.5);
+            std::vector<float> in (std::vector<float> ((size_t) total, 0.0f));
+            for (int i = atSeconds (0.1); i < atSeconds (0.1 + delay * 0.3); ++i)
+                in[(size_t) i] = noise (rng);
+            // a burst that lies inside the newest stretch when Hold goes on
+            const double burstAt = (double) sampleOfBlock (pressBlock) / kSr - delay * 0.7;
+            for (int i = atSeconds (burstAt); i < atSeconds (burstAt + 0.02); ++i)
+                in[(size_t) i] = 0.5f * noise (rng) * 2.0f;
+            const auto out = runFlip (p, in, in, 2, nullptr, [pressBlock] (int block, mph::Params& q) { q.hold = block >= pressBlock; });
+            const int press = sampleOfBlock (pressBlock);
+            // the burst comes round every "delay": correlate the loop with itself one delay later (away from the seam)
+            const int pass = atSeconds (delay);
+            const int start = press + 2 * pass;           // two passes in: well after the press
+            double diff = 0.0, ref = 1.0e-30;
+            for (int i = start; i < start + atSeconds (delay * 0.6); ++i)
+            {
+                diff += std::pow ((double) out.l[(size_t) i] - (double) out.l[(size_t) (i + pass)], 2.0);
+                ref += std::pow ((double) out.l[(size_t) i], 2.0);
+            }
+            expect (ref > 1.0e-4 && diff < 1.0e-4 * ref + 1.0e-12, "Hold: the loop repeats exactly every delay time (Zones 2 to 5)");
+            expect (energy (out.l, start + atSeconds (delay * 3.0), start + atSeconds (delay * 4.0)) > 0.5 * energy (out.l, start, start + pass),
+                    "Hold: the loop does not fade away");
+        }
+
+        // ---- Repeats scrubs: a rising ramp is stored; the start point moves the loop back through it ----
+        {
+            const double delay = 0.4, slope = 5.0e-6;
+            const int total = atSeconds (5.5);
+            const int pressBlock = blockAt (3.0);
+            const int press = sampleOfBlock (pressBlock);
+            double means[3] = { 0, 0, 0 };
+            const float knobs[3] = { 0.0f, 0.5f, 1.0f };
+            for (int k = 0; k < 3; ++k)
+            {
+                mph::Params p = repeatsOnly (4, rateForDelay (4, delay), 0.0f);
+                const float knob = knobs[k];
+                const auto out = runFlip (p, rampSignal (total, (float) slope), {}, 2, nullptr, [pressBlock, knob] (int block, mph::Params& q)
+                {
+                    q.hold = block >= pressBlock;
+                    q.repeats = block >= pressBlock ? knob : 0.0f;          // one echo before: the memory holds the plain ramp
+                });
+                // one whole pass of the loop, some time after the press (the start point has glided to its place)
+                const int a = press + atSeconds (1.0);
+                expect (a + atSeconds (delay) <= total, "(Hold scrub test: the window lies inside the signal)");
+                means[k] = meanOf (out.l, a, a + atSeconds (delay));
+            }
+            // the loop is [press - start - delay, press - start]: its mean is slope * (press - start - delay / 2)
+            for (int k = 0; k < 3; ++k)
+            {
+                const double start = core::holdStartSeconds (knobs[k], 4, delay);
+                const double wanted = slope * ((double) press - start * kSr - 0.5 * delay * kSr);
+                // the seam (30 ms of crossfade) shifts the mean a little: allow 8 %
+                expect (std::fabs (means[k] - wanted) < 0.08 * std::fabs (wanted) + 0.002, "Hold: Repeats sets where the loop starts (0, half way, fully right in Zone 4)");
+            }
+            expect (means[0] > means[1] && means[1] > means[2], "Hold: turning Repeats right scrubs further back through the stored sound");
+        }
+
+        // ---- pressing with the start point far back is a crossfaded jump, not a click ----
+        {
+            const int total = atSeconds (4.0);
+            const int pressBlock = blockAt (2.5);
+            const int press = sampleOfBlock (pressBlock);
+            const auto in = sineSignal (total, 440.0, 0.5f);
+            mph::Params p = repeatsOnly (4, rateForDelay (4, 0.5), 0.0f);
+            const auto out = runFlip (p, in, {}, 2, nullptr, [pressBlock] (int block, mph::Params& q)
+            {
+                q.hold = block >= pressBlock;
+                q.repeats = block >= pressBlock ? 0.6f : 0.0f;
+            });
+            const double normal = 2.0 * 3.14159265358979323846 * 440.0 / kSr * 0.5;
+            expect (maxStep (out.l, press - 200, press + atSeconds (0.3)) < 2.0 * normal + 1.0e-4, "Hold: pressing with Repeats well to the right (a far start point) crossfades: no click");
+            // and a hand moving Repeats while held glides without clicks
+            const auto moved = runFlip (p, in, {}, 2, nullptr, [pressBlock] (int block, mph::Params& q)
+            {
+                q.hold = block >= pressBlock;
+                q.repeats = block < pressBlock ? 0.0f : block > pressBlock + 40 ? std::min (1.0f, 0.6f + 0.0015f * (float) (block - pressBlock - 40)) : 0.6f;
+            });
+            expect (maxStep (moved.l, press + atSeconds (0.8), atSeconds (3.9)) < 2.5 * normal + 1.0e-4, "Hold: turning Repeats while held scrubs without clicks");
+        }
+
+        // ---- releasing: back to the live repeat, no click, and the input is heard again ----
+        {
+            const double delay = 0.3;
+            const int total = atSeconds (4.0);
+            const int pressBlock = blockAt (1.5), releaseBlock = blockAt (2.5);
+            std::vector<float> in = sineSignal (total, 330.0, 0.4f);
+            for (int i = atSeconds (2.7); i < total; ++i)
+                in[(size_t) i] = 0.0f;                                  // silence after the release...
+            for (int i = atSeconds (3.0); i < atSeconds (3.3); ++i)
+                in[(size_t) i] = 0.4f * (float) std::sin (2.0 * 3.14159265358979323846 * 330.0 * (double) i / kSr);   // ...and then a new tone
+            mph::Params p = repeatsOnly (3, rateForDelay (3, delay));
+            const auto out = runFlip (p, in, {}, 2, nullptr, [=] (int block, mph::Params& q) { q.hold = block >= pressBlock && block < releaseBlock; });
+            const int release = sampleOfBlock (releaseBlock);
+            const double normal = 2.0 * 3.14159265358979323846 * 330.0 / kSr * 0.4;
+            expect (maxStep (out.l, release - 100, release + atSeconds (0.1)) < 3.0 * normal + 1.0e-4, "Hold released: back to the live repeat without a click");
+            expect (energy (out.l, atSeconds (3.0 + delay + 0.02), atSeconds (3.0 + delay + 0.2)) > 1.0, "Hold released: the input is written and heard again (a new tone comes back one delay later)");
+            expect (energy (out.l, atSeconds (3.6), atSeconds (3.9)) < 1.0e-3 * energy (out.l, atSeconds (3.0 + delay + 0.02), atSeconds (3.0 + delay + 0.2)),
+                    "Hold released with Repeats at one echo: the loop does not stay (silence after the new tone's echo)");
+        }
+
+        // ---- the loop plays at normal speed whatever Rate does (no doppler), and its length follows Rate ----
+        {
+            const int total = atSeconds (6.0);
+            const int pressBlock = blockAt (1.5);
+            const auto in = sineSignal (total, 1000.0, 0.4f);
+            mph::Params p = repeatsOnly (4, rateForDelay (4, 0.5));
+            const auto out = runFlip (p, in, {}, 2, nullptr, [pressBlock] (int block, mph::Params& q)
+            {
+                q.hold = block >= pressBlock;
+                if (block >= pressBlock + 20) q.rate = std::min (0.9f, 0.5f + 0.001f * (float) (block - pressBlock - 20));        // Rate moves for seconds
+            });
+            const double err = medianPitchError (out.l, 1000.0, atSeconds (2.0), atSeconds (5.5));
+            expect (err < 0.01, "Hold: Rate moving does not bend the pitch of the loop (it only makes the loop longer or shorter)");
+        }
+
+        // ---- the loop length follows Zone, Rate and Tempo Sync ----
+        {
+            core::HostInfo host;
+            host.tempoValid = true;
+            host.bpm = 120.0;
+            host.beatsPerBar = 4.0;
+            const int total = atSeconds (7.0);
+            std::vector<float> in ((size_t) total, 0.0f);
+            const int pressBlock = blockAt (2.0);
+            const double burstAt = (double) sampleOfBlock (pressBlock) / kSr - 0.2;
+            for (int i = atSeconds (burstAt); i < atSeconds (burstAt + 0.01); ++i)
+                in[(size_t) i] = 0.5f;
+            mph::Params p = repeatsOnly (4, rateForDelay (4, 0.5));
+            p.tempoSync = true;
+            p.clockDivision = 3;                      // 1/4
+            p.rate = 0.5f;                            // about 1/1: one clock tick, 500 ms at 120 BPM in Zone 4
+            const auto out = runFlip (p, in, {}, 2, &host, [pressBlock] (int block, mph::Params& q) { q.hold = block >= pressBlock; });
+            const int a = sampleOfBlock (pressBlock) + atSeconds (1.2);
+            std::vector<int> peaks;
+            for (int i = a; i < atSeconds (6.0); ++i)
+                if (std::fabs (out.l[(size_t) i]) > 0.2f && (peaks.empty() || i - peaks.back() > atSeconds (0.25)))
+                    peaks.push_back (i);
+            expect (peaks.size() >= 3 && std::abs ((peaks[2] - peaks[1]) - atSeconds (0.5)) <= 2 && std::abs ((peaks[1] - peaks[0]) - atSeconds (0.5)) <= 2,
+                    "Hold with Tempo Sync: the loop is the clocked time (a click comes round every 500 ms at 120 BPM)");
+        }
+
+        // ---- Color, Halo and Flip work on the held loop; Color leaves the stored sound untouched ----
+        for (int colorCase = 0; colorCase < 2; ++colorCase)
+        {
+            const double hz = colorCase == 0 ? 5000.0 : 200.0;              // dark takes the 5 kHz tone away, thin takes the 200 Hz tone away
+            const float colorAway = colorCase == 0 ? 0.05f : 1.0f;
+            const int total = atSeconds (6.0);
+            const int pressBlock = blockAt (1.5), awayBlock = blockAt (2.5), backBlock = blockAt (4.0);
+            mph::Params p = repeatsOnly (4, rateForDelay (4, 0.5));
+            const auto out = runFlip (p, sineSignal (total, hz, 0.4f), {}, 2, nullptr, [=] (int block, mph::Params& q)
+            {
+                q.hold = block >= pressBlock;
+                q.color = (block >= awayBlock && block < backBlock) ? colorAway : mph::core::kColorUnity;
+            });
+            const double before = energy (out.l, atSeconds (2.0), atSeconds (2.4)), during = energy (out.l, atSeconds (3.0), atSeconds (3.4)),
+                         after = energy (out.l, atSeconds (5.0), atSeconds (5.4));
+            expect (during < 0.3 * before, colorCase == 0 ? "Hold: Color to the dark side darkens the held loop" : "Hold: Color to the thin side thins the held loop");
+            expect (std::fabs (after - before) < 0.03 * before, colorCase == 0 ? "Hold: back at unity the held sound is exactly as it was (Color does not damage it)"
+                                                                               : "Hold: the same for the thin side (the stored sound is untouched)");
+        }
+        {
+            const int total = atSeconds (4.0);
+            const int pressBlock = blockAt (1.5);
+            const auto in = noiseOf (total);
+            auto run = [&] (float halo)
+            {
+                mph::Params p = repeatsOnly (4, rateForDelay (4, 0.5));
+                p.halo = halo;
+                return runFlip (p, in, in, 2, nullptr, [pressBlock] (int block, mph::Params& q) { q.hold = block >= pressBlock; });
+            };
+            const auto plain = run (0.0f), hall = run (1.0f);
+            const int a = atSeconds (2.6), b = atSeconds (3.9);
+            expect (std::memcmp (plain.l.data() + a, hall.l.data() + a, (size_t) (b - a) * sizeof (float)) != 0, "Hold: Halo works on the held loop");
+            bool finite = true;
+            double worst = 0.0;
+            for (int i = 0; i < total; ++i) { finite = finite && std::isfinite (hall.l[(size_t) i]); worst = std::max (worst, (double) std::fabs (hall.l[(size_t) i])); }
+            expect (finite && worst < 4.0, "Hold with Halo fully right: bounded");
+        }
+        {
+            // Flip: the held loop is played backwards (a rising ramp falls); off it rises
+            const int total = atSeconds (4.0);
+            const int pressBlock = blockAt (3.0);
+            mph::Params p = repeatsOnly (4, rateForDelay (4, 0.5));
+            const auto fwd = runFlip (p, rampSignal (total, 5.0e-6f), {}, 2, nullptr, [pressBlock] (int block, mph::Params& q) { q.hold = block >= pressBlock; });
+            p.flip = true;
+            const auto rev = runFlip (p, rampSignal (total, 5.0e-6f), {}, 2, nullptr, [pressBlock] (int block, mph::Params& q) { q.hold = block >= pressBlock; });
+            const int a = sampleOfBlock (pressBlock) + atSeconds (0.6), b = atSeconds (3.9);
+            expect (slopeShare (fwd.l, 5.0e-6f, 1.0, a, b) > 0.85, "Hold: the held loop rises (a stored rising ramp plays forwards)");
+            expect (slopeShare (rev.l, 5.0e-6f, -1.0, a, b) > 0.85, "Hold with Flip: the held loop plays backwards (the stored ramp comes out falling at the same slope)");
+        }
+
+        // ---- Skew: each side loops its own length ----
+        {
+            const int total = atSeconds (8.0);
+            const int pressBlock = blockAt (3.0);
+            std::vector<float> in ((size_t) total, 0.0f);
+            const double burstAt = (double) sampleOfBlock (pressBlock) / kSr - 0.1;
+            for (int i = atSeconds (burstAt); i < atSeconds (burstAt + 0.01); ++i)
+                in[(size_t) i] = 0.5f;
+            mph::Params p = repeatsOnly (4, 0.5f);
+            auto change = [pressBlock] (int block, mph::Params& q)
+            {
+                q.skew = true;
+                q.rate = block < 5 ? 0.5f : 0.7f;
+                q.hold = block >= pressBlock;
+            };
+            const auto held = runFlip (p, in, in, 2, nullptr, change);
+            auto spacing = [&] (const std::vector<float>& v)
+            {
+                std::vector<int> peaks;
+                for (int i = sampleOfBlock (pressBlock) + atSeconds (1.5); i < atSeconds (7.5); ++i)
+                    if (std::fabs (v[(size_t) i]) > 0.2f && (peaks.empty() || i - peaks.back() > atSeconds (0.1)))
+                        peaks.push_back (i);
+                return peaks.size() >= 3 ? peaks[2] - peaks[1] : 0;
+            };
+            const int left = spacing (held.l), right = spacing (held.r);
+            expect (left > 0 && right > 0 && left != right && std::abs (left - right) > atSeconds (0.1), "Hold with Skew: the two sides loop different lengths");
+            // each side's loop equals the delay that side heard before Hold: echoes with Repeats raised, no Hold
+            mph::Params live = repeatsOnly (4, 0.5f, 0.75f);
+            const auto echoes = runFlip (live, in, in, 2, nullptr, [] (int block, mph::Params& q) { q.skew = true; q.rate = block < 5 ? 0.5f : 0.7f; });
+            std::vector<int> pl, pr;
+            for (int i = sampleOfBlock (pressBlock) + atSeconds (0.3); i < atSeconds (7.0); ++i)
+            {
+                if (std::fabs (echoes.l[(size_t) i]) > 0.05f && (pl.empty() || i - pl.back() > atSeconds (0.1))) pl.push_back (i);
+                if (std::fabs (echoes.r[(size_t) i]) > 0.05f && (pr.empty() || i - pr.back() > atSeconds (0.1))) pr.push_back (i);
+            }
+            expect (pl.size() >= 3 && pr.size() >= 3 && std::abs ((pl[2] - pl[1]) - left) <= 2 && std::abs ((pr[2] - pr[1]) - right) <= 2,
+                    "Hold with Skew: each side's loop is as long as its own delay time (the Left / Right figures)");
+        }
+
+        // ---- Ping Pong: the two sides trade places on every pass ----
+        {
+            const double hop = 0.25;                 // Zone 3, 500 ms delay, each bounce half of it
+            const int total = atSeconds (5.0);
+            std::vector<float> in ((size_t) total, 0.0f);
+            for (int i = atSeconds (1.0); i < atSeconds (1.0) + 24; ++i)
+                in[(size_t) i] = 0.6f;
+            mph::Params p = repeatsOnly (3, rateForDelay (3, 0.5), 0.6f);
+            p.pingPong = true;
+            const int pressBlock = blockAt (1.9);
+            const auto out = runFlip (p, in, in, 2, nullptr, [pressBlock] (int block, mph::Params& q) { q.hold = block >= pressBlock; });
+            const int press = sampleOfBlock (pressBlock);
+            const int pass = atSeconds (hop);
+            // the stored newest quarter second holds an echo in one side only; each pass the two sides trade places
+            auto passEnergy = [&] (const std::vector<float>& v, int k) { return energy (v, press + k * pass + atSeconds (0.02), press + (k + 1) * pass - atSeconds (0.05)); };
+            const double l1 = passEnergy (out.l, 1), r1 = passEnergy (out.r, 1), l2 = passEnergy (out.l, 2), r2 = passEnergy (out.r, 2);
+            const double l3 = passEnergy (out.l, 3), r3 = passEnergy (out.r, 3);
+            const bool alternates = (l1 > 20.0 * r1 && r2 > 20.0 * l2 && l3 > 20.0 * r3) || (r1 > 20.0 * l1 && l2 > 20.0 * r2 && r3 > 20.0 * l3);
+            expect (alternates, "Hold with Ping Pong: the held echo bounces left, right, left on every pass");
+        }
+
+        // ---- uRate's LFO still bends the loop; Clear empties it ----
+        {
+            const int total = atSeconds (5.0);
+            const int pressBlock = blockAt (1.5);
+            const auto in = sineSignal (total, 1000.0, 0.4f);
+            mph::Params p = repeatsOnly (4, rateForDelay (4, 0.5));
+            p.uRateLfoDepth = 0.9f;
+            p.uRateLfoRate = 0.3f;
+            const auto out = runFlip (p, in, {}, 2, nullptr, [pressBlock] (int block, mph::Params& q) { q.hold = block >= pressBlock; });
+            const double err = medianPitchError (out.l, 1000.0, atSeconds (2.5), atSeconds (4.5));
+            expect (err > 0.01, "Hold: the uRate LFO still bends the pitch of the loop");
+            mph::Params c = repeatsOnly (4, rateForDelay (4, 0.5));
+            const int clearBlock = blockAt (3.0);
+            const auto cleared = runFlip (c, in, {}, 2, nullptr, [=] (int block, mph::Params& q) { q.hold = block >= pressBlock; q.clear = block == clearBlock; });
+            expect (energy (cleared.l, atSeconds (2.0), atSeconds (2.9)) > 1.0 && peakAbs (cleared.l, sampleOfBlock (clearBlock) + 1024, atSeconds (5.0)) < 1.0e-6,
+                    "Hold with Clear: the stored sound is emptied and the loop goes silent");
+        }
+
+        // ---- Zone change while held: a new loop length, crossfaded ----
+        {
+            const int total = atSeconds (5.0);
+            const int pressBlock = blockAt (1.5), zoneBlock = blockAt (3.0);
+            const auto in = sineSignal (total, 440.0, 0.5f);
+            mph::Params p = repeatsOnly (4, 0.5f);
+            const auto out = runFlip (p, in, {}, 2, nullptr, [=] (int block, mph::Params& q) { q.hold = block >= pressBlock; q.zone = block >= zoneBlock ? 3 : 4; });
+            const double normal = 2.0 * 3.14159265358979323846 * 440.0 / kSr * 0.5;
+            expect (maxStep (out.l, sampleOfBlock (zoneBlock) - 50, sampleOfBlock (zoneBlock) + atSeconds (0.3)) < 2.0 * normal + 1.0e-4, "Hold: changing Zone while held crossfades (no click)");
+        }
+
+        // ---- mono, and the host tail ----
+        {
+            const int total = atSeconds (3.0);
+            const int pressBlock = blockAt (1.0);
+            mph::Params p = repeatsOnly (3, rateForDelay (3, 0.3));
+            const auto out = runFlip (p, noiseOf (total), {}, 1, nullptr, [pressBlock] (int block, mph::Params& q) { q.hold = block >= pressBlock; });
+            bool finite = true;
+            for (float v : out.l) finite = finite && std::isfinite (v);
+            expect (finite && energy (out.l, atSeconds (2.0), atSeconds (3.0)) > 1.0, "Hold: a mono plugin loops too");
+            mph::Params h = repeatsOnly (3, rateForDelay (3, 0.3));
+            h.hold = true;
+            const auto tail = runFlip (h, noiseOf (4096), {});
+            expect (tail.tail >= core::kTailCapSeconds - 1.0e-9, "Hold: the host is told the loop never dies away (the longest tail)");
+        }
+    }
+
+    void testHoldStability()
+    {
+        std::mt19937 rng (4711);
+        std::uniform_real_distribution<float> noise (-0.5f, 0.5f), unit (0.0f, 1.0f);
+        bool finite = true, bounded = true;
+        for (int run = 0; run < 40; ++run)
+        {
+            const int channels = (run % 5 == 4) ? 1 : 2;
+            mph::Engine e;
+            e.prepare (kSr, 512, channels);
+            std::vector<float> l (512), r (512);
+            for (int block = 0; block < 160; ++block)
+            {
+                mph::Params p;
+                p.hold = (rng() % 3) != 0 && block > 20;
+                p.flip = (rng() % 4) == 0;
+                p.halo = unit (rng);
+                p.repeats = (run % 2 == 0) ? 1.0f : unit (rng);
+                p.zone = (int) (rng() % 8);
+                p.rate = unit (rng);
+                p.color = unit (rng);
+                p.mix = unit (rng);
+                p.skew = (rng() % 3) == 0;
+                p.pingPong = (rng() % 3) == 0;
+                p.tempoSync = (rng() % 4) == 0;
+                p.uRate = unit (rng);
+                p.uRateLfoDepth = unit (rng);
+                p.uRateLfoRate = unit (rng);
+                p.clear = (rng() % 40) == 0;
+                for (size_t i = 0; i < l.size(); ++i) { l[i] = noise (rng); r[i] = noise (rng); }
+                float* chans[2] = { l.data(), r.data() };
+                e.setParams (p);
+                e.process (chans, channels, 512);
+                for (size_t i = 0; i < l.size(); ++i)
+                {
+                    finite = finite && std::isfinite (l[i]) && std::isfinite (r[i]);
+                    bounded = bounded && std::fabs (l[i]) < 8.0f && std::fabs (r[i]) < 8.0f;
+                }
+            }
+        }
+        expect (finite, "Hold: 40 random runs (every control moving, Hold going on and off, mono and stereo): never anything but numbers");
+        expect (bounded, "Hold: 40 random runs stay bounded");
+
+        // the worst case: Zone 7 at its longest, the start point far back, flipped, with Halo, uRate and its LFO at the far ends, 50 s of loud noise
+        {
+            mph::Engine e;
+            e.prepare (kSr, 512, 2);
+            mph::Params p;
+            p.zone = 7;
+            p.rate = 1.0f;
+            p.repeats = 1.0f;
+            p.halo = 1.0f;
+            p.flip = true;
+            p.uRate = 1.0f;
+            p.uRateLfoDepth = 1.0f;
+            p.uRateLfoRate = 1.0f;
+            p.mix = 1.0f;
+            p.inputLevel = 1.0f;
+            double worst = 0.0;
+            bool ok = true;
+            std::vector<float> l (512), r (512);
+            for (int block = 0; block < (int) (kSr * 50.0) / 512; ++block)
+            {
+                p.hold = block > (int) (kSr * 20.0) / 512 && block < (int) (kSr * 40.0) / 512;
+                if (block > (int) (kSr * 30.0) / 512)
+                    p.repeats = 0.5f;
+                for (size_t i = 0; i < l.size(); ++i) { l[i] = noise (rng); r[i] = noise (rng); }
+                float* chans[2] = { l.data(), r.data() };
+                e.setParams (p);
+                e.process (chans, 2, 512);
+                for (size_t i = 0; i < l.size(); ++i)
+                {
+                    ok = ok && std::isfinite (l[i]) && std::isfinite (r[i]);
+                    worst = std::max (worst, (double) std::max (std::fabs (l[i]), std::fabs (r[i])));
+                }
+            }
+            expect (ok && worst < 4.0, "Hold in Zone 7 at 41.8 s with the start point scrubbing, Flip, Halo fully right, uRate and its LFO at the far ends, 50 s of loud noise: bounded");
+        }
+    }
 }
 
 int main()
@@ -3312,6 +3809,9 @@ int main()
     testFlipRules();
     testFlipSound();
     testFlipStability();
+    testHoldRules();
+    testHoldSound();
+    testHoldStability();
 
     std::printf ("engine tests: %d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;

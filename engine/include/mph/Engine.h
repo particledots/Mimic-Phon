@@ -1,12 +1,11 @@
 // The Mimic-Phon engine. Plain C++17, no JUCE, no plugin code.
 //
-// Milestone 10: the core repeater (milestone 4), Color (5), Skew, Ping Pong and Swap (6), uRate with its LFO (7), Tempo Sync of Rate (8), Halo (9), and Flip.
+// Milestone 11: the core repeater (milestone 4), Color (5), Skew, Ping Pong and Swap (6), uRate with its LFO (7), Tempo Sync of Rate (8), Halo (9), Flip (10), and Hold.
 // What works now, and what does not:
 //
 //   Works:   Input Level and the Input Gain step, Zone, Rate, Repeats, Mix, Output Level, Clear, Color, Skew, Ping Pong / Swap,
-//            uRate and the uRate LFO (Rate, Depth, Sine / Triangle, Sync to Logic's tempo), Tempo Sync of Rate, Halo, Flip.
-//   Not yet: Hold (11).
-//            That control is read but does nothing.
+//            uRate and the uRate LFO (Rate, Depth, Sine / Triangle, Sync to Logic's tempo), Tempo Sync of Rate, Halo, Flip, Hold.
+//   Not yet: nothing; every control works (milestone 12 is polish).
 //
 // How it sounds, in short: the input is written into one shared stereo buffer (core/DelayBuffer.h, 41.8 s or more) that serves
 // all eight Zones. The repeat is the buffer read back at the delay time that Zone and Rate give (core/ZoneMap.h, the same
@@ -51,6 +50,13 @@
 //     milliseconds long: the manual's "total protonic reversal". uRate and its LFO still bend the reversed sound. With Flip off nothing is
 //     touched, bit for bit.
 //
+//   * Hold (core/Hold.h): the memory stops being written and the repeat becomes a loop of the stored sound, as long as the delay time (each
+//     side its own, with Skew / Ping Pong / Tempo Sync). Repeats then sets where the loop starts inside the Zone (0 = the newest stretch, so
+//     pressing makes no jump); a far move crossfades, a small one glides like scrubbing tape. The input is ignored and nothing is fed back.
+//     Color (a second filter that is not written into the memory), Halo, Flip (the loop backwards), uRate, Ping Pong / Swap, Tempo Sync, Skew,
+//     Zone, Rate and Clear all keep working on the loop. Releasing crossfades back to the live repeat in 10 ms. With Hold off nothing is touched,
+//     bit for bit.
+//
 // Window-only things from milestone 3 (never affect the sound): Logic's tempo as last heard, and two counters for the blinking
 // lights: one goes up at every tick of the tempo clock (TICK), the other every time the current delay time has passed (RATE).
 
@@ -58,12 +64,14 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstdint>
 
 #include "Params.h"
 #include "core/Color.h"
 #include "core/DelayBuffer.h"
 #include "core/Flip.h"
 #include "core/Halo.h"
+#include "core/Hold.h"
 #include "core/HostClock.h"
 #include "core/Repeats.h"
 #include "core/Skew.h"
@@ -213,6 +221,20 @@ namespace mph
         Ramp flipAmount;
         float dcInH[2] = { 0.0f, 0.0f }, dcOutH[2] = { 0.0f, 0.0f };
         bool flipWasActive = false;
+
+        // Hold (milestone 11): while the button is on the memory is frozen (nothing is written) and each side's read point(s) loop a stretch of it.
+        // holdAmount is how much of the heard repeat is the loop (it jumps to 1 when Hold is pressed, because the loop carries on exactly where
+        // the delay was; it fades back to 0 in about 10 ms when Hold is released); holdSoft fades the loop's own extras (Color on the loop,
+        // the reversed loop under Flip) in and out. holdHeads[channel][which read point] follow the same two read points as the delay (current / incoming).
+        bool holdOn = false;                               // the button, as of the last block
+        bool holdWasActive = false;
+        std::int64_t holdEnd = 0;                          // the memory position where Hold was pressed (the stored sound ends here)
+        core::HoldHead holdHeads[2][2];
+        Ramp holdAmount, holdSoft;
+        core::ColorFilter holdColorFilter;                 // Color on the loop that is heard (the other filter keeps working on what is written)
+        float holdScrubCoefficient = 0.001f;
+        bool holdSwapSide = false;                         // Ping Pong / Swap while held: the two sides trade places every pass of the left loop
+        Ramp holdSwap;
 
         // Color (milestone 5): the knob glides (about 30 ms) and the filter's coefficients follow every 16 samples
         core::ColorFilter colorFilter;

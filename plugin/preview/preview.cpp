@@ -16,6 +16,8 @@
 //      left and Mix fully right (Filter-Verb), is silent when fully left, and stays finite; picture styled_panel_halo.png.
 //   8. (milestone 10) checks Flip: the Delay box shows the length of the reversed chunk (and says FLIP), and through the real processor the echo
 //      is heard backwards (a click lands mirrored round the chunk start); picture styled_panel_flip.png.
+//   9. (milestone 11) checks Hold: the Delay box shows the loop length, Repeats reads "newest" / "start ...", and through the real
+//      processor the loop keeps sounding with silence or new sound at the input;
 //
 // Usage: MimicPhonPreview <folder for the pictures>
 
@@ -992,6 +994,74 @@ int main (int argc, char** argv)
             }
         }
 
+        // ---- Hold (milestone 11): the Delay box shows the loop, Repeats reads the loop's start point ----
+        {
+            MimicPhonProcessor q;
+            fresh (q);
+            setParameter (q, MphParams::repeats, 0.0f);
+            setParameter (q, MphParams::hold, 1.0f);
+            processSeconds (q, 0.1, 480);
+            MimicPhonEditor win (q);
+            win.setSize (1200, 800);
+            auto* pn = win.getStyledPanel();
+            if (pn != nullptr)
+            {
+                pn->refreshNow();
+                auto r = pn->getReadout();
+                expect (r.holdOn && r.delayLeft == "653 ms" && r.delayRight == "653 ms", "Hold: the Delay box shows the loop length, 653 ms (the delay time it was)");
+                std::vector<KnobCard*> cards;
+                collect (*pn, cards);
+                auto text = [&] (const char* id) -> juce::String
+                {
+                    for (auto* c : cards)
+                        if (juce::String (c->getParameterId()) == id)
+                            return c->getReadoutText();
+                    return "(no such card)";
+                };
+                expect (text (MphParams::repeats) == "newest", "Hold with Repeats fully left: Repeats reads \"newest\"");
+                setParameter (q, MphParams::repeats, 0.5f);
+                processSeconds (q, 0.1, 480);
+                pn->refreshNow();
+                const auto t = text (MphParams::repeats);
+                expect (t.startsWith ("start "), "Hold with Repeats at the middle: Repeats reads a start point (\"start ...\")");
+                setParameter (q, MphParams::hold, 0.0f);
+                processSeconds (q, 0.1, 480);
+                pn->refreshNow();
+                expect (! pn->getReadout().holdOn && ! text (MphParams::repeats).startsWith ("start ") && text (MphParams::repeats) != "newest", "Hold off: Repeats reads the feedback figure again, not a start point");
+            }
+        }
+
+        // Hold through the real processor: the input is ignored, the loop keeps sounding
+        {
+            MimicPhonProcessor q;
+            fresh (q);
+            setParameter (q, MphParams::repeats, 0.0f);
+            q.setPlayConfigDetails (2, 2, 48000.0, 480);
+            juce::AudioBuffer<float> buf (2, 480);
+            juce::MidiBuffer midi;
+            auto run = [&] (double sec, float amp)
+            {
+                double e = 0.0;
+                for (int b = 0; b < (int) (sec * 100); ++b)
+                {
+                    for (int i = 0; i < 480; ++i)
+                        for (int c = 0; c < 2; ++c)
+                            buf.setSample (c, i, amp * std::sin (0.05f * (float) (b * 480 + i)));
+                    q.processBlock (buf, midi);
+                    for (int i = 0; i < 480; ++i)
+                        e += std::fabs (buf.getSample (0, i));
+                }
+                return e;
+            };
+            run (1.0, 0.5f);
+            setParameter (q, MphParams::hold, 1.0f);
+            run (0.1, 0.0f);
+            const double loud = run (2.0, 0.0f);
+            expect (loud > 1.0, "Hold: the loop keeps sounding with silence at the input");
+            const double ignored = run (1.0, 0.8f);
+            expect (ignored > 0.5, "Hold: new input does not break the loop");
+        }
+
         // ---- Tempo Sync (milestone 8): the echo heard is the time the window shows ----
         {
             // Default Zone 4, Rate 1/1, 120 BPM assumed (no playhead here): 500 ms
@@ -1140,6 +1210,23 @@ int main (int argc, char** argv)
         processSeconds (haloProc, 0.3, 480);
         letWindowThreadRun (150);
         save (haloEditor, outDir.getChildFile ("styled_panel_halo.png"), 1.0f);
+    }
+
+    // ---------------- a picture with Hold on: the Delay box says HOLD and the Repeats card reads its start point ----------------
+    {
+        MimicPhonProcessor holdProc;
+        holdProc.setPlayConfigDetails (2, 2, 48000.0, 512);
+        holdProc.prepareToPlay (48000.0, 512);
+        resetAll (holdProc);
+        MimicPhonEditor holdEditor (holdProc);
+        holdEditor.showView (MimicPhonEditor::View::styled);
+        holdEditor.setSize (1200, 800);
+        setParameter (holdProc, MphParams::hold, 1.0f);
+        setParameter (holdProc, MphParams::zone, 3.0f / 7.0f);
+        setParameter (holdProc, MphParams::repeats, 0.4f);
+        processSeconds (holdProc, 0.3, 480);
+        letWindowThreadRun (150);
+        save (holdEditor, outDir.getChildFile ("styled_panel_hold.png"), 1.0f);
     }
 
     // ---------------- a picture with Flip on (its own plugin object): the Delay box says FLIP and shows the chunk ----------------

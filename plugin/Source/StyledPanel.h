@@ -7,7 +7,7 @@
 // The read-outs of the controls that make sound (milestone 4: Input and Output Level, Mix, Repeats, Zone, Rate) use the engine's own
 // functions (core/Gain.h, core/Repeats.h, core/ZoneMap.h), so the number shown is the number heard. For the controls that do not make
 // sound yet, the read-out is a first guess at what the position will mean (a percentage, semitones, Hertz); these are tuned together
-// with the sound in the later milestones. The control ids never change. With Tempo Sync on (milestone 8) the Rate card names the clock step and the delay read-out is the clocked time. The Halo card (milestone 9) reads the engine's own word and percentage (core/Halo.h). With Flip on (milestone 10) the delay box shows the length of the reversed chunk that is heard (core/Flip.h) and its header says FLIP.
+// with the sound in the later milestones. The control ids never change. With Tempo Sync on (milestone 8) the Rate card names the clock step and the delay read-out is the clocked time. The Halo card (milestone 9) reads the engine's own word and percentage (core/Halo.h). With Flip on (milestone 10) the delay box shows the length of the reversed chunk that is heard (core/Flip.h) and its header says FLIP. With Hold on (milestone 11) the delay box shows the loop length (header HOLD) and the Repeats card reads the loop's start point, "newest" or "start 453 ms" (core/Hold.h).
 //
 // The panel is laid out in a fixed 1200 x 800 space; the editor scales it to the window.
 // (The look-and-feel, fonts, KnobCard and the chip selector follow PhenomeEon's StyledPanel, copied and renamed.)
@@ -72,6 +72,9 @@ public:
     // A small piece of text drawn inside the card.
     void addNote (const juce::String& text, juce::Rectangle<int> area, juce::Justification,
                   float size = 11.5f, bool useMono = false, juce::Colour colour = MphStyle::muted);
+
+    // Replace the text of a note added earlier (0 = the first one); the card repaints when it changed.
+    void setNoteText (int index, const juce::String& newText);
 
     // A short line outside the dial at a knob position (0..1), for the unity mark of Color, the 1/1 mark of Rate and the
     // eight steps of Zone.
@@ -174,6 +177,8 @@ public:
         bool pingFlashing = false;              // Ping Pong or Swap is working (the Zone window flashes)
         bool skewed = false;                    // the two sides are noticeably different
         bool flipOn = false;                    // Flip is on: the delay box shows the length of the reversed chunk (header "DELAY FLIP")
+        bool holdOn = false;                    // Hold is on: the delay box shows the length of the loop (header "DELAY HOLD") and Repeats reads the start point
+        double holdLoopLeft = 0.0;              // seconds: the loop the left side plays (the start point's read-out is worked out from it)
         juce::String pingLabel;                 // the Ping Pong / Swap button's label: "PING PONG / SWAP" (off), "PING PONG" or "SWAP"
     };
     Readout getReadout() const;
@@ -199,6 +204,7 @@ private:
     void timerCallback() override;
     double currentDelaySeconds (float rate) const;       // the delay time a Rate position gives in the current Zone
     juce::String currentSignature (const Readout&) const;
+    juce::String repeatsReadout (double value) const;      // "one echo" ... "inf +12 %", or with Hold on the loop's start point
 
     void paintZoneBand (juce::Graphics&);
 
@@ -209,6 +215,8 @@ private:
 
     std::vector<std::unique_ptr<KnobCard>> cards;
     KnobCard* rateCard = nullptr;
+    KnobCard* repeatsCard = nullptr;
+    bool lastHoldShown = false;
     std::unique_ptr<ChipSelector> gainChips;
     KnobCard* uRateCard = nullptr;
     std::unique_ptr<LfoCard> lfoCard;

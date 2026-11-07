@@ -270,6 +270,15 @@ void KnobCard::addNote (const juce::String& noteText, juce::Rectangle<int> area,
     notes.push_back ({ noteText, area, j, size, useMono, colour });
 }
 
+void KnobCard::setNoteText (int index, const juce::String& newText)
+{
+    if (index >= 0 && index < (int) notes.size() && notes[(size_t) index].text != newText)
+    {
+        notes[(size_t) index].text = newText;
+        repaint();
+    }
+}
+
 void KnobCard::addMark (double position01, juce::Colour colour)
 {
     marks.push_back ({ position01, colour });
@@ -407,7 +416,8 @@ MimicPhonStyledPanel::MimicPhonStyledPanel (juce::AudioProcessorValueTreeState& 
     // ---- first row: Input Level, Mix, Repeats, Halo, Output Level ----
     auto& input  = addKnob (MphParams::inputLevel,  "INPUT LEVEL",  levelText);
     addKnob (MphParams::mix, "MIX", mixText);
-    auto& repeats = addKnob (MphParams::repeats,    "REPEATS", repeatsText);
+    auto& repeats = addKnob (MphParams::repeats,    "REPEATS", [this] (double value) { return repeatsReadout (value); });
+    repeatsCard = &repeats;
     auto& halo = addKnob (MphParams::halo, "HALO", haloText);
     halo.addNote ("OFF ... TIGHT ... WIDE", { 4, 186, 200, 24 }, juce::Justification::centred, 13.5f, false);
     addKnob (MphParams::outputLevel, "OUTPUT LEVEL", levelText);
@@ -527,6 +537,16 @@ double MimicPhonStyledPanel::currentDelaySeconds (float rate) const
     return mph::core::freeDelaySeconds (zone, rate);
 }
 
+// Repeats: the echoes (as before), or with Hold on the start of the loop inside the Zone, from the engine's own function (core/Hold.h)
+juce::String MimicPhonStyledPanel::repeatsReadout (double value) const
+{
+    const auto r = getReadout();
+    if (! r.holdOn)
+        return repeatsText (value);
+    const double start = mph::core::holdStartSeconds ((float) value, r.zone, r.holdLoopLeft);
+    return start < 0.0005 ? juce::String ("newest") : "start " + delayText (start);
+}
+
 MimicPhonStyledPanel::Readout MimicPhonStyledPanel::getReadout() const
 {
     auto get = [this] (const char* id) { return state.getRawParameterValue (id)->load(); };
@@ -557,7 +577,17 @@ MimicPhonStyledPanel::Readout MimicPhonStyledPanel::getReadout() const
     const float uRateKnob = get (MphParams::uRate);
     const bool splitSides = stereo && skewState.skewed;
     r.flipOn = get (MphParams::flip) > 0.5f;
-    if (r.flipOn)
+    r.holdOn = get (MphParams::hold) > 0.5f;
+    if (r.holdOn)
+    {
+        // Hold: the loop is as long as the delay time (core/Hold.h); in Zone 0 uRate sets its pitch, so its length; the other Zones keep the
+        // length and uRate only bends the pitch. The start point is worked out from the left side's loop.
+        const double leftBase = currentDelaySeconds (rateLeft) * hop, rightBase = currentDelaySeconds (rateRight) * hop;
+        r.holdLoopLeft = mph::core::holdLoopSeconds (leftBase);
+        r.delayLeft = delayText (mph::core::holdLoopSeconds (r.zone == 0 ? mph::core::uRateStaticDelay (0, leftBase, uRateKnob, 0, false) : leftBase));
+        r.delayRight = delayText (mph::core::holdLoopSeconds (r.zone == 0 ? mph::core::uRateStaticDelay (0, rightBase, uRateKnob, 1, false) : rightBase));
+    }
+    else if (r.flipOn)
     {
         // Flip: what is heard is the memory read backwards in chunks as long as the delay time (core/Flip.h). uRate only bends the pitch
         // (Zones 1-7), so it is not in the figure; in Zone 0 it sets the pitch of the loop and the chunk. Long chunks are held to what fits.
@@ -601,7 +631,7 @@ MimicPhonStyledPanel::Readout MimicPhonStyledPanel::getReadout() const
 juce::String MimicPhonStyledPanel::currentSignature (const Readout& r) const
 {
     return juce::String (r.zone) + "|" + r.delayLeft + "|" + r.delayRight + "|" + r.tempo + "|" + r.rateText + "|"
-           + (r.synced ? "s" : "f") + (r.pingFlashing ? "p" : "n") + (flashBright ? "b" : "d") + (r.flipOn ? "F" : "-") + "|" + r.pingLabel
+           + (r.synced ? "s" : "f") + (r.pingFlashing ? "p" : "n") + (flashBright ? "b" : "d") + (r.flipOn ? "F" : "-") + (r.holdOn ? "H" : "-") + "|" + r.pingLabel
            + "|" + juce::String (state.getRawParameterValue (MphParams::uRateLfoSync)->load());
 }
 
@@ -650,6 +680,15 @@ void MimicPhonStyledPanel::timerCallback()
         bandChanged = true;
         if (rateCard != nullptr)
             rateCard->repaint();
+        if (repeatsCard != nullptr)
+        {
+            if (r.holdOn != lastHoldShown)
+            {
+                lastHoldShown = r.holdOn;
+                repeatsCard->setNoteText (0, r.holdOn ? "NEWEST ... START POINT ... OLDEST" : "ONE ECHO ... INFINITE+");
+            }
+            repeatsCard->repaint();         // with Hold on its read-out depends on the Zone and Rate too
+        }
         if (uRateCard != nullptr)
             uRateCard->repaint();           // its read-out depends on the Zone
         if (lfoCard != nullptr)
@@ -722,7 +761,7 @@ void MimicPhonStyledPanel::paintZoneBand (juce::Graphics& g)
         const int x = kReadoutBox.getX(), y = kReadoutBox.getY();
         g.setColour (muted);
         g.setFont (mono (14.0f));
-        g.drawText (shown.flipOn ? "DELAY  FLIP" : "DELAY", juce::Rectangle<int> (x + 18, y + 11, 130, 18), juce::Justification::centredLeft, false);
+        g.drawText (shown.holdOn ? (shown.flipOn ? "DELAY HOLD FLIP" : "DELAY  HOLD") : shown.flipOn ? "DELAY  FLIP" : "DELAY", juce::Rectangle<int> (x + 18, y + 11, 130, 18), juce::Justification::centredLeft, false);
         g.drawText ("TICK", juce::Rectangle<int> (x + 158, y + 11, 40, 18), juce::Justification::centredRight, false);
         g.drawText ("RATE", juce::Rectangle<int> (x + 158, y + 34, 40, 18), juce::Justification::centredRight, false);
 
