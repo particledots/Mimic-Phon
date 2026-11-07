@@ -3,7 +3,7 @@
 The detailed notes for each milestone, newest first. A version is listed as tested only after it has been tested in Logic on both
 test Macs (the M4 Mac mini and the Intel Mac) and worked as described. The README describes the current version.
 
-Version 0.11.0 (milestone 11, Hold; **not yet tested in Logic**). Hold now freezes the sound into a loop.
+Version 0.11.0 (milestone 11, Hold; **tested in Logic on both Macs on 7 November 2026: worked as described, "sounds great"**). Hold now freezes the sound into a loop.
 
 - **Hold** (`core/Hold.h`, new; `core/DelayBuffer.h`, `Engine`): pressing Hold **stops writing into the shared memory**, so the memory is the stored sound; the input is ignored and nothing is fed back. The **loop is a stretch of the stored sound as long as the delay time** (the Left / Right figure in the window), ending a "start" before the moment Hold was pressed. **Repeats fully left = start 0 = the newest stretch, exactly what the delay was playing, so pressing makes no jump and no click.** Turning Repeats right scrubs the start point back through the Zone's memory (up to the Zone's longest time minus the loop). A big move is a 20 ms crossfaded jump, a small one glides (40 ms), so a hand on the knob scrubs with a little tape-like bend.
 - **The loop closes seamlessly:** the last quarter of the loop (4 samples to 30 ms) is crossfaded with the sound just before the loop starts (raised cosine), forwards and backwards.
@@ -13,7 +13,8 @@ Version 0.11.0 (milestone 11, Hold; **not yet tested in Logic**). Hold now freez
 - **Window:** the Delay box reads **DELAY  HOLD** (and **DELAY HOLD FLIP**) and shows the loop length; the Repeats card reads **newest** or **start 453 ms** and its note becomes *NEWEST ... START POINT ... OLDEST*; the plain window lists Hold as working. Version string 0.11.0.
 - **Milestone 10 finished:** 0.10.0 tested in Logic on both Macs on 7 November 2026 ("all sounds good with Flip").
 - Engine self-test now **586 checks (59 new)**, clean under ASan/UBSan; preview **312 checks (7 new)**, picture `styled_panel_hold.png`. GitHub run #24, commit ff01c00 (see the README for the result). **No control id changed** (21).
-- **First guesses to retune by ear:** the start point is absolute (Repeats 0 to 1 spans the Zone's memory) rather than relative to the press; the scrub range is the current Zone's memory (the alternative is the whole 41.8 s); Color is applied again to the held loop (so a non-unity Color at press is heard twice); the 20 ms jump threshold and 40 ms glide; the Ping Pong swap every pass; the 25 % / 30 ms seam; the 10 ms release crossfade; the loop cap of 41.76 s.
+- **Listening verdict (7 Nov 2026):** the scrub feel, the Ping Pong swap every pass, the loop seam and the release fade sound right; Color applied again to the held loop is wanted. **Asked for in milestone 12:** a switch for the scrub range (current Zone only, or the whole 41.8 s memory); the start point stays absolute.
+- **First guesses (now judged by ear):** the start point is absolute (Repeats 0 to 1 spans the Zone's memory) rather than relative to the press; the scrub range is the current Zone's memory (the alternative is the whole 41.8 s); Color is applied again to the held loop (so a non-unity Color at press is heard twice); the 20 ms jump threshold and 40 ms glide; the Ping Pong swap every pass; the 25 % / 30 ms seam; the 10 ms release crossfade; the loop cap of 41.76 s.
 - Not in this version: nothing planned is missing; milestone 12 is polish and the 1.0.0 release.
 
 Version 0.10.0 (milestone 10, Flip; **tested in Logic on both Macs on 7 November 2026: worked as described, "all sounds good with Flip"**). Flip now plays every repeat backwards.
