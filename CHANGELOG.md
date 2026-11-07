@@ -3,7 +3,7 @@
 The detailed notes for each milestone, newest first. A version is listed as tested only after it has been tested in Logic on both
 test Macs (the M4 Mac mini and the Intel Mac) and worked as described. The README describes the current version.
 
-Version 1.0.0 (milestone 12, polish and release; **built and checked, not yet tested in Logic**). The Hold Range switch, and the checks that make it a finished plugin.
+Version 1.0.0 (milestone 12, polish and release; **tested in Logic on both Macs on 7 November 2026: worked as described, "it works"**). The Hold Range switch, and the checks that make it a finished plugin.
 
 - **Hold Range** (`core/Hold.h`, `Params.h`, `Engine`, wrapper, both windows): while Hold is on, Repeats scrubs the loop's start through the **current Zone's memory** (**Zone**, default, exactly 0.11.0) or the **whole 41.8 s memory** (**Full**). The **22nd control**, id `holdRange` (a button, off = Zone), appended at the end; the 21 older ids are unchanged and older projects open with it on Zone. Styled panel: **RANGE: ZONE / RANGE: FULL** button next to HOLD (lit when Full); the Repeats card reads the start point the sound plays (*start 16.6 s*) and its note reads *NEWEST ... FULL MEMORY ... OLDEST*. Plain window: **HOLD RANGE (ON = FULL MEMORY)**. Switching while held is a 20 ms crossfade, not a click; with Hold off, or in Zone 7, the switch changes nothing.
 - **Zone is 0.11.0 bit for bit:** 60 mixed runs (random settings, Hold, Flip, Halo, Skew, Ping Pong, Tempo Sync, mono / stereo, 44.1 / 48 / 96 kHz) through the 0.11.0 engine and the 1.0.0 engine gave the same checksum.
