@@ -60,9 +60,12 @@ void Engine::prepare (double newSampleRate, int newMaxBlockSize, int newNumChann
     started = false;
     clearWasOn = false;
     lastZone = -1;
+    lastPingHop = false;
     current = 0;
     fading = false;
     fadePosition = 0.0f;
+    skew = core::SkewState();
+    ratePhaseRight = 0.0;
 
     publishTargets();
 }
@@ -72,24 +75,55 @@ void Engine::setParams (const Params& p)
     params = p;
     params.zone = std::min (kNumZones - 1, std::max (0, params.zone));
     params.inputGainStep = std::min (kNumInputGainSteps - 1, std::max (0, params.inputGainStep));
+    skew.update (params.skew, params.rate);          // the Skew button and Rate: engages, holds or clears the split (once per block)
     publishTargets();
+}
+
+double Engine::delayForRate (float rate01)
+{
+    if (kTempoSyncAudible && params.tempoSync)
+        return core::syncDelaySeconds (params.zone, rate01, clock.beatsPerTickNow() * clock.secondsPerBeat());
+    return core::freeDelaySeconds (params.zone, rate01);
 }
 
 double Engine::currentDelaySeconds()
 {
-    if (kTempoSyncAudible && params.tempoSync)
-        return core::syncDelaySeconds (params.zone, params.rate, clock.beatsPerTickNow() * clock.secondsPerBeat());
-    return core::freeDelaySeconds (params.zone, params.rate);
+    return delayForRate (params.rate);
 }
 
-// What the window and the host get to know: the delay time aimed at, the feedback, the tail.
+// The two sides' delay times. Skew moves them apart; the Ping Pong hop halves both (each bounce is half the delay time).
+Engine::SideDelays Engine::sideDelays()
+{
+    float left = params.rate, right = params.rate;
+    if (numChannels == 2)
+    {
+        const core::ChannelRates r = skew.ratesNow (params.rate);
+        left = r.left;
+        right = r.right;
+    }
+    SideDelays d { delayForRate (left), delayForRate (right) };
+    if (pingHop())
+    {
+        d.left *= core::kPingPongHop;
+        d.right *= core::kPingPongHop;
+    }
+    return d;
+}
+
+// What the window and the host get to know: the delay time aimed at, the feedback, the tail, the Skew memory.
 void Engine::publishTargets()
 {
     const double delay = currentDelaySeconds();
+    const SideDelays sides = sideDelays();
     const float fb = core::repeatsToFeedback (params.repeats);
     delayShown.store ((float) delay);
     feedbackShown.store (fb);
-    tailShown.store ((float) core::tailSeconds (delay, fb));
+    tailShown.store ((float) core::tailSeconds (std::max (sides.left, sides.right), fb));
+    skewEngagedShown.store (skew.engaged);
+    skewSkewedShown.store (skew.skewed);
+    skewCentreShown.store (skew.centre);
+    skewHeldShown.store (skew.held);
+    skewShiftShown.store (skew.shift);
 }
 
 // Everything written so far reads as silence from now on; the feedback path's memory is emptied too.
@@ -123,13 +157,32 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
     }
     tickCount.store (clock.ticksSoFar());
 
-    const double delaySeconds = currentDelaySeconds();
-    ratePhase += (double) numSamples / (delaySeconds * sampleRate);
-    if (ratePhase >= 1.0)
+    // The RATE light: one blink per delay time of the Rate knob's own time; with the two sides skewed, a blink for each side.
     {
-        const double whole = std::floor (ratePhase);
-        rateCount.fetch_add ((int) whole);
-        ratePhase -= whole;
+        float rateLeft = params.rate, rateRight = params.rate;
+        if (numChannels == 2)
+        {
+            const core::ChannelRates r = skew.ratesNow (params.rate);
+            rateLeft = r.left;
+            rateRight = r.right;
+        }
+        ratePhase += (double) numSamples / (delayForRate (rateLeft) * sampleRate);
+        if (ratePhase >= 1.0)
+        {
+            const double whole = std::floor (ratePhase);
+            rateCount.fetch_add ((int) whole);
+            ratePhase -= whole;
+        }
+        if (rateRight != rateLeft)
+        {
+            ratePhaseRight += (double) numSamples / (delayForRate (rateRight) * sampleRate);
+            if (ratePhaseRight >= 1.0)
+            {
+                const double whole = std::floor (ratePhaseRight);
+                rateCount.fetch_add ((int) whole);
+                ratePhaseRight -= whole;
+            }
+        }
     }
     publishTargets();
 
@@ -142,17 +195,25 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
     outputGain.target = dsp::levelKnobToGain (params.outputLevel);
     dryGain.target    = std::cos (mixAngle);
     wetGain.target    = std::sin (mixAngle);
+    const SideDelays sides = sideDelays();
+    const bool stereoRouting = numChannels == 2 && channelCount == 2;
+    const bool pingHopNow = pingHop() && stereoRouting;
+    crossing.target = (params.pingPong && stereoRouting) ? 1.0 : 0.0;     // Ping Pong and Swap both cross the feedback paths
+    monoSum.target = pingHopNow ? 1.0 : 0.0;                               // only Ping Pong sums the inputs into the left side
     {
         // Beyond infinite grows per second rather than per echo, so short delays do not run away in a moment.
+        const double shortest = std::min (sides.left, sides.right);
         float fb = core::repeatsToFeedback (params.repeats);
         if (fb > 1.0f)
-            fb = 1.0f + (fb - 1.0f) * (float) std::min (1.0, delaySeconds / kBeyondFullDelaySeconds);
+            fb = 1.0f + (fb - 1.0f) * (float) std::min (1.0, shortest / kBeyondFullDelaySeconds);
         feedback.target = fb;
     }
     colorKnob.target = (double) std::min (1.0f, std::max (0.0f, params.color));
 
-    // The two read points. Rate glides the audible one; a new Zone is a jump, so it goes to the other one and crossfades.
-    const double logLive = std::log (delaySeconds);
+    // The read points: one pair per side. Rate glides the audible one; a jump (a new Zone, the Ping Pong hop switching on or off, or a
+    // Skew button press that moves the times) goes to the other one of the pair and crossfades.
+    const double logLive[2] = { std::log (sides.left), std::log (sides.right) };
+    const bool skewJump = skew.takeJump();
     if (! started)
     {
         inputGain.snap (inputGain.target);
@@ -160,35 +221,48 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
         dryGain.snap (dryGain.target);
         wetGain.snap (wetGain.target);
         feedback.snap (feedback.target);
+        crossing.snap (crossing.target);
+        monoSum.snap (monoSum.target);
         colorKnob.snap (colorKnob.target);
         colorApplied = (float) colorKnob.value;
         colorFilter.setShape (core::colorShape (colorApplied));
         colorCountdown = kColorUpdateSamples;
-        heads[0].logDelay = heads[0].logTarget = logLive;
-        heads[1] = heads[0];
+        for (int c = 0; c < 2; ++c)
+        {
+            heads[c][0].logDelay = heads[c][0].logTarget = logLive[c];
+            heads[c][1] = heads[c][0];
+        }
         current = 0;
         fading = false;
         lastZone = params.zone;
+        lastPingHop = pingHopNow;
         started = true;
     }
-    else if (params.zone != lastZone)
+    else if (params.zone != lastZone || pingHopNow != lastPingHop || skewJump)
     {
         lastZone = params.zone;
-        Head& incoming = heads[1 - current];
-        incoming.logDelay = incoming.logTarget = logLive;          // the new Zone's time, at once (no glide, so no pitch effect)
+        lastPingHop = pingHopNow;
+        for (int c = 0; c < 2; ++c)
+        {
+            Head& incoming = heads[c][1 - current];
+            incoming.logDelay = incoming.logTarget = logLive[c];       // the new time, at once (no glide, so no pitch effect)
+        }
         if (! fading)
         {
             fading = true;
             fadePosition = 0.0f;
         }
     }
-    if (fading)
+    for (int c = 0; c < 2; ++c)
     {
-        heads[current].logTarget = heads[current].logDelay;        // the old read point holds its time while it fades out
-        heads[1 - current].logTarget = logLive;
+        if (fading)
+        {
+            heads[c][current].logTarget = heads[c][current].logDelay;      // the old read point holds its time while it fades out
+            heads[c][1 - current].logTarget = logLive[c];
+        }
+        else
+            heads[c][current].logTarget = logLive[c];
     }
-    else
-        heads[current].logTarget = logLive;
 
     const double minDelay = dsp::DelayBuffer::kMinDelaySamples;
     const double maxDelay = buffers[0].maxDelaySamples();
@@ -210,32 +284,40 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
             }
         }
 
-        Head& hc = heads[current];
-        hc.logDelay += (hc.logTarget - hc.logDelay) * (double) delayCoefficient;
-        const double delayCurrent = std::min (maxDelay, std::max (minDelay, std::exp (hc.logDelay) * sampleRate));
+        const float crossG = crossing.next (rampCoefficient), monoG = monoSum.next (rampCoefficient);
 
-        double delayIncoming = delayCurrent;
-        if (fading)
-        {
-            Head& hi = heads[1 - current];
-            hi.logDelay += (hi.logTarget - hi.logDelay) * (double) delayCoefficient;
-            delayIncoming = std::min (maxDelay, std::max (minDelay, std::exp (hi.logDelay) * sampleRate));
-        }
-
+        // Each side's read point(s)
+        double delayCurrent[2] = { minDelay, minDelay }, delayIncoming[2] = { minDelay, minDelay };
         for (int c = 0; c < channelCount; ++c)
         {
-            float x = channels[c][n];
-            if (! std::isfinite (x))
-                x = 0.0f;                                          // a bad sample must never get into the feedback
-            x *= inG;
-
-            float wet = buffers[c].read (delayCurrent);
+            Head& hc = heads[c][current];
+            hc.logDelay += (hc.logTarget - hc.logDelay) * (double) delayCoefficient;
+            delayCurrent[c] = std::min (maxDelay, std::max (minDelay, std::exp (hc.logDelay) * sampleRate));
+            delayIncoming[c] = delayCurrent[c];
             if (fading)
-                wet += fadePosition * (buffers[c].read (delayIncoming) - wet);
+            {
+                Head& hi = heads[c][1 - current];
+                hi.logDelay += (hi.logTarget - hi.logDelay) * (double) delayCoefficient;
+                delayIncoming[c] = std::min (maxDelay, std::max (minDelay, std::exp (hi.logDelay) * sampleRate));
+            }
+        }
+
+        // First every side's repeat is read and prepared for feedback, then everything is written (Ping Pong and Swap cross the two).
+        float x[2] = { 0.0f, 0.0f }, wet[2] = { 0.0f, 0.0f }, fedBack[2] = { 0.0f, 0.0f };
+        for (int c = 0; c < channelCount; ++c)
+        {
+            x[c] = channels[c][n];
+            if (! std::isfinite (x[c]))
+                x[c] = 0.0f;                                       // a bad sample must never get into the feedback
+            x[c] *= inG;
+
+            wet[c] = buffers[c].read (delayCurrent[c]);
+            if (fading)
+                wet[c] += fadePosition * (buffers[c].read (delayIncoming[c]) - wet[c]);
 
             // What is fed back: the repeat, minus any DC, scaled by Repeats, kept from running away by the soft limiter.
-            float blocked = wet - dcIn[c] + dcCoefficient * dcOut[c];
-            dcIn[c] = wet;
+            float blocked = wet[c] - dcIn[c] + dcCoefficient * dcOut[c];
+            dcIn[c] = wet[c];
             if (std::fabs (blocked) < 1.0e-20f)
                 blocked = 0.0f;
             dcOut[c] = blocked;
@@ -250,10 +332,25 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
             else
                 levelGain[c] += (wanted - levelGain[c]) * levelRelease;
             fed *= levelGain[c];
-            // What is written: the live signal plus the fed-back repeat, shaped by Color (exactly untouched at unity).
-            buffers[c].write (colorFilter.process (c, x + dsp::softLimit (fed)));
+            fedBack[c] = dsp::softLimit (fed);
+        }
 
-            channels[c][n] = (dryG * x + wetG * wet) * outG;
+        for (int c = 0; c < channelCount; ++c)
+        {
+            // What goes in: the live signal (Ping Pong: both inputs summed to mono, into the left side only) plus the fed-back repeat
+            // (Ping Pong and Swap: the other side's repeat), shaped by Color (exactly untouched at unity).
+            float live = x[c];
+            float returned = fedBack[c];
+            if (stereoRouting)
+            {
+                if (monoG > 0.0f)
+                    live = c == 0 ? x[0] + monoG * (0.5f * (x[0] + x[1]) - x[0]) : x[1] * (1.0f - monoG);
+                if (crossG > 0.0f)
+                    returned = fedBack[c] + crossG * (fedBack[1 - c] - fedBack[c]);
+            }
+            buffers[c].write (colorFilter.process (c, live + returned));
+
+            channels[c][n] = (dryG * x[c] + wetG * wet[c]) * outG;
         }
 
         if (fading)

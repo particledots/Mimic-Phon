@@ -409,6 +409,7 @@ MimicPhonStyledPanel::MimicPhonStyledPanel (juce::AudioProcessorValueTreeState& 
     addPanelButton (MphParams::flip,     "FLIP");
     addPanelButton (MphParams::skew,     "SKEW");
     addPanelButton (MphParams::pingPong, "PING PONG / SWAP");
+    pingButton = &buttons.back()->button;      // its label says which one is working: Ping Pong (sides together) or Swap (skewed)
     addPanelButton (MphParams::clear,    "CLEAR");
     // Clear switches itself off at once (the engine has done its job), so the button would never be seen lit.
     // Show it lit for about a third of a second so a click is visible.
@@ -461,12 +462,11 @@ void MimicPhonStyledPanel::addPanelButton (const char* id, const juce::String& l
 }
 
 //==============================================================================
-double MimicPhonStyledPanel::currentDelaySeconds() const
+double MimicPhonStyledPanel::currentDelaySeconds (float rate) const
 {
     auto get = [this] (const char* id) { return state.getRawParameterValue (id)->load(); };
 
     const int zone = juce::jlimit (0, mph::kNumZones - 1, (int) std::lround (get (MphParams::zone)));
-    const float rate = get (MphParams::rate);
 
     // Tempo Sync is built in milestone 8; until then the sound is free-running whatever the button says, so the read-out is too.
     if (mph::kTempoSyncAudible && get (MphParams::tempoSync) > 0.5f)
@@ -488,23 +488,45 @@ MimicPhonStyledPanel::Readout MimicPhonStyledPanel::getReadout() const
     Readout r;
     r.zone = juce::jlimit (0, mph::kNumZones - 1, (int) std::lround (get (MphParams::zone)));
     r.synced = mph::kTempoSyncAudible && get (MphParams::tempoSync) > 0.5f;
-    r.pingFlashing = get (MphParams::pingPong) > 0.5f;
 
-    // With Skew on the Left and Right times will differ (milestone 6); for now both show the time of the Rate knob.
-    const double seconds = currentDelaySeconds();
-    r.delayLeft = r.delayRight = delayText (seconds);
+    // Skew and Ping Pong / Swap: the same rules and the same functions as the sound (core/Skew.h), so the read-out is what is heard.
+    const float rate = get (MphParams::rate);
+    const bool stereo = engine.isStereo();
+    const auto skewState = engine.getSkewState();
+    const auto mode = mph::core::pingMode (get (MphParams::pingPong) > 0.5f, stereo, skewState);
+    r.pingFlashing = mode != mph::core::PingMode::off;
+    r.pingLabel = mph::core::pingLabel (mode);
+    r.skewed = stereo && skewState.skewed;
+
+    float rateLeft = rate, rateRight = rate;
+    if (stereo)
+    {
+        const auto sides = skewState.ratesNow (rate);
+        rateLeft = sides.left;
+        rateRight = sides.right;
+    }
+    const double hop = mode == mph::core::PingMode::pingPong ? mph::core::kPingPongHop : 1.0;     // Ping Pong: each bounce is half the time
+    r.delayLeft = delayText (currentDelaySeconds (rateLeft) * hop);
+    r.delayRight = delayText (currentDelaySeconds (rateRight) * hop);
 
     const float bpm = engine.getHostBpm();
     r.tempo = bpm > 0.0f ? "TEMPO " + juce::String (bpm, 1) + " BPM" : juce::String ("TEMPO 120.0 (assumed)");
 
-    if (r.synced)
+    if (r.skewed)
+    {
+        // The Rate knob is pulling the two sides apart (or has left a split behind): say how far, and which side is faster
+        const float skew = skewState.skewNow (rate);
+        const int percent = juce::roundToInt (std::fabs (skew) / (0.5f * mph::core::kSkewSwing) * 100.0f);
+        r.rateText = juce::String (skew > 0.0f ? "L" : "R") + " faster " + juce::String (percent) + " %";
+    }
+    else if (r.synced)
     {
         const int division = juce::jlimit (0, mph::core::kNumClockDivisions - 1, (int) std::lround (get (MphParams::clockDivision)));
         r.rateText = juce::String (mph::core::kSyncNames[mph::core::syncStep (get (MphParams::rate))])
                      + " (tempo " + mph::core::kClockDivisions[division].name + ")";
     }
     else
-        r.rateText = delayText (seconds);
+        r.rateText = delayText (currentDelaySeconds (stereo ? skewState.baseNow (rate) : rate));
 
     return r;
 }
@@ -512,7 +534,7 @@ MimicPhonStyledPanel::Readout MimicPhonStyledPanel::getReadout() const
 juce::String MimicPhonStyledPanel::currentSignature (const Readout& r) const
 {
     return juce::String (r.zone) + "|" + r.delayLeft + "|" + r.delayRight + "|" + r.tempo + "|" + r.rateText + "|"
-           + (r.synced ? "s" : "f") + (r.pingFlashing ? "p" : "n") + (flashBright ? "b" : "d")
+           + (r.synced ? "s" : "f") + (r.pingFlashing ? "p" : "n") + (flashBright ? "b" : "d") + "|" + r.pingLabel
            + "|" + juce::String (state.getRawParameterValue (MphParams::uRateLfoSync)->load());
 }
 
@@ -520,6 +542,10 @@ void MimicPhonStyledPanel::timerCallback()
 {
     const auto r = getReadout();
     bool bandChanged = false;
+
+    // The Ping Pong / Swap button says which of the two is working
+    if (pingButton != nullptr && pingButton->getButtonText() != r.pingLabel)
+        pingButton->setButtonText (r.pingLabel);
 
     if (clearGlow > 0 && --clearGlow == 0 && clearButton != nullptr)
     {

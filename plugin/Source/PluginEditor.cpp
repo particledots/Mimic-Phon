@@ -133,12 +133,12 @@ void MimicPhonSliderPanel::paint (juce::Graphics& g)
     g.drawRoundedRectangle (note.toFloat().reduced (0.5f), 6.0f, 1.0f);
     g.setColour (kAmber);
     g.setFont (font (12.0f, true));
-    g.drawText ("VERSION " JucePlugin_VersionString " - THE REPEATER WITH COLOR", note.getX() + 14, note.getY() + 10, note.getWidth() - 28, 18,
+    g.drawText ("VERSION " JucePlugin_VersionString " - THE REPEATER WITH SKEW AND PING PONG", note.getX() + 14, note.getY() + 10, note.getWidth() - 28, 18,
                 juce::Justification::centredLeft);
     g.setColour (kText);
     g.setFont (font (14.0f));
-    g.drawFittedText ("Working now: Input Level and gain step, Zone, Rate, Repeats, Mix, Output Level, Clear and Color. "
-                      "Still silent (built in the next milestones): Halo, Skew, Ping Pong / Swap, uRate and its LFO, "
+    g.drawFittedText ("Working now: Input Level and gain step, Zone, Rate, Repeats, Mix, Output Level, Clear, Color, Skew and Ping Pong / Swap. "
+                      "Still silent (built in the next milestones): Halo, uRate and its LFO, "
                       "Tempo Sync, Flip and Hold. The styled panel shows the same controls.",
                       note.getX() + 14, note.getY() + 34, note.getWidth() - 28, note.getHeight() - 44,
                       juce::Justification::topLeft, 6, 1.0f);

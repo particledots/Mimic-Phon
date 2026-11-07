@@ -164,7 +164,9 @@ public:
         juce::String tempo;                     // "TEMPO 120.0 BPM"
         juce::String rateText;                  // the Rate knob's read-out
         bool synced = false;
-        bool pingFlashing = false;
+        bool pingFlashing = false;              // Ping Pong or Swap is working (the Zone window flashes)
+        bool skewed = false;                    // the two sides are noticeably different
+        juce::String pingLabel;                 // the Ping Pong / Swap button's label: "PING PONG / SWAP" (off), "PING PONG" or "SWAP"
     };
     Readout getReadout() const;
     juce::Colour getZoneWindowColour() const { return MphStyle::zoneColour (shown.zone); }
@@ -172,6 +174,7 @@ public:
     // The lights (true while lit), for the automatic checks.
     bool tickLightOn() const { return tickPulse > 0; }
     bool rateLightOn() const { return ratePulse > 0; }
+    juce::String pingButtonText() const { return pingButton != nullptr ? pingButton->getButtonText() : juce::String(); }   // "PING PONG / SWAP", "PING PONG" or "SWAP"
     bool zoneWindowBright() const { return flashBright; }       // false for half a second at a time while Ping Pong / Swap is on
 
     // Runs the timer's work once (the preview tool calls this instead of waiting).
@@ -186,7 +189,7 @@ private:
     KnobCard& addKnob (const char* id, const juce::String& title, std::function<juce::String (double)> format = {});
     void addPanelButton (const char* id, const juce::String& text, juce::Colour onColour = MphStyle::amber);
     void timerCallback() override;
-    double currentDelaySeconds() const;
+    double currentDelaySeconds (float rate) const;       // the delay time a Rate position gives in the current Zone
     juce::String currentSignature (const Readout&) const;
 
     void paintZoneBand (juce::Graphics&);
@@ -205,6 +208,7 @@ private:
     std::unique_ptr<ComboBoxAttachment> clockAttachment;
     juce::TextButton plainSliders { "PLAIN SLIDERS" };
     juce::TextButton* clearButton = nullptr;
+    juce::TextButton* pingButton = nullptr;
     int clearGlow = 0;
 
     // What was last drawn in the Zone band (so it is redrawn only when something changed).

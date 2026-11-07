@@ -1,10 +1,10 @@
 // The Mimic-Phon engine. Plain C++17, no JUCE, no plugin code.
 //
-// Milestone 5: the core repeater (milestone 4) plus Color. What works now, and what does not:
+// Milestone 6: the core repeater (milestone 4), Color (5) and Skew, Ping Pong and Swap. What works now, and what does not:
 //
-//   Works:   Input Level and the Input Gain step, Zone, Rate, Repeats, Mix, Output Level, Clear, Color.
-//   Not yet: Skew / Ping Pong / Swap (6), uRate and its LFO (7), Tempo Sync (8), Halo (9), Flip (10), Hold (11).
-//            Those controls are read but do nothing; the left and right channels are independent until Skew and Ping Pong.
+//   Works:   Input Level and the Input Gain step, Zone, Rate, Repeats, Mix, Output Level, Clear, Color, Skew, Ping Pong / Swap.
+//   Not yet: uRate and its LFO (7), Tempo Sync (8), Halo (9), Flip (10), Hold (11).
+//            Those controls are read but do nothing.
 //
 // How it sounds, in short: the input is written into one shared stereo buffer (core/DelayBuffer.h, 41.8 s or more) that serves
 // all eight Zones. The repeat is the buffer read back at the delay time that Zone and Rate give (core/ZoneMap.h, the same
@@ -19,6 +19,11 @@
 //   * Color (core/Color.h): a saturation and filter character applied to everything written into the buffer (live signal plus
 //     feedback), so each echo is shaped once more than the last. Left of unity: dark (saturation and a closing low-pass, down to
 //     "oil can"); at unity (about 3:00): nothing, bit for bit; right of unity: thin (a rising high-pass and a little fizz).
+//   * Skew (core/Skew.h): with Skew on, Rate pulls the left and right delay times apart (clockwise: left faster, right slower; 12:00 =
+//     none). Each side has its own read points, so a Zone change or a button press that makes the times jump crossfades on both.
+//   * Ping Pong (button on, sides not skewed): the inputs are summed to mono into the left side only, the feedback of each side goes
+//     into the other, and each hop is half the delay time, so the repeats bounce left, right, left ... Swap (button on, sides
+//     skewed): the left and right feedback paths are swapped, inputs stay stereo, times stay as Skew set them.
 //
 // Window-only things from milestone 3 (never affect the sound): Logic's tempo as last heard, and two counters for the blinking
 // lights: one goes up at every tick of the tempo clock (TICK), the other every time the current delay time has passed (RATE).
@@ -33,6 +38,7 @@
 #include "core/DelayBuffer.h"
 #include "core/HostClock.h"
 #include "core/Repeats.h"
+#include "core/Skew.h"
 #include "core/ZoneMap.h"
 
 namespace mph
@@ -69,6 +75,18 @@ namespace mph
         int getRateTickCount() const { return rateCount.load(); }             // +1 every time the current delay time has passed
         float getDelaySeconds() const { return delayShown.load(); }           // the delay time the Zone and Rate settings aim at
         float getFeedback() const { return feedbackShown.load(); }            // what the Repeats knob feeds back (1.0 = infinite)
+        bool isStereo() const { return numChannels == 2; }                    // Skew and Ping Pong / Swap need two channels
+        // The Skew memory as of the last block (the window works out its Left / Right read-out from it and the live Rate knob).
+        core::SkewState getSkewState() const
+        {
+            core::SkewState s;
+            s.engaged = skewEngagedShown.load();
+            s.skewed = skewSkewedShown.load();
+            s.centre = skewCentreShown.load();
+            s.held = skewHeldShown.load();
+            s.shift = skewShiftShown.load();
+            return s;
+        }
         double getTailSeconds() const { return (double) tailShown.load(); }   // how long the repeats keep sounding (host "tail")
 
         double getSampleRate() const { return sampleRate; }
@@ -92,7 +110,11 @@ namespace mph
             }
         };
 
-        double currentDelaySeconds();
+        double delayForRate (float rate01);                // the delay time a knob position gives (free running, or synced from milestone 8)
+        double currentDelaySeconds();                      // the Rate knob's own delay time (no skew, no ping pong hop)
+        struct SideDelays { double left, right; };
+        SideDelays sideDelays();                           // the two sides' delay times, with Skew and the Ping Pong hop in them
+        bool pingHop() const { return numChannels == 2 && params.pingPong && ! skew.skewed; }
         void publishTargets();
         void clearRepeats();
 
@@ -112,13 +134,19 @@ namespace mph
         bool started = false;                              // false until the first block after prepare(): then everything snaps to its setting
         bool clearWasOn = false;
         int lastZone = -1;
-        Head heads[2];
-        int current = 0;                                   // which read point is the audible one
-        bool fading = false;                               // crossfading to the other read point (a Zone change)
+        Head heads[2][2];                                  // [channel][which read point]
+        int current = 0;                                   // which read point is the audible one (the same for both channels)
+        bool fading = false;                               // crossfading to the other read point (a Zone change, or any jump)
+        bool lastPingHop = false;
         float fadePosition = 0.0f, fadeStep = 0.001f;
         float delayCoefficient = 0.0005f;                  // how fast Rate glides (one-pole, about 160 ms)
         float rampCoefficient = 0.002f;                    // how fast the level controls glide (one-pole, about 10 ms)
         Ramp inputGain, outputGain, dryGain, wetGain, feedback;
+
+        // Skew, Ping Pong, Swap (milestone 6)
+        core::SkewState skew;
+        Ramp crossing, monoSum;                            // 1 = feedback paths crossed (Ping Pong / Swap); 1 = inputs summed into the left side (Ping Pong)
+        double ratePhaseRight = 0.0;                       // the RATE light follows both sides when they differ
 
         // Color (milestone 5): the knob glides (about 30 ms) and the filter's coefficients follow every 16 samples
         core::ColorFilter colorFilter;
@@ -137,5 +165,7 @@ namespace mph
         std::atomic<float> delayShown { 0.6531f };
         std::atomic<float> feedbackShown { 0.0f };
         std::atomic<float> tailShown { 0.0f };
+        std::atomic<bool> skewEngagedShown { false }, skewSkewedShown { false };
+        std::atomic<float> skewCentreShown { 0.5f }, skewHeldShown { 0.0f }, skewShiftShown { 0.0f };
     };
 }

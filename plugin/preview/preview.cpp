@@ -524,6 +524,215 @@ int main (int argc, char** argv)
         }
     }
 
+    // ---------------- Skew, Ping Pong / Swap: the read-outs say what the sound does ----------------
+    {
+        // Runs a click on both inputs through a real processor (Mix fully wet, one echo) and returns when the echo is heard on each side.
+        auto echoTimes = [] (MimicPhonProcessor& p, double& left, double& right)
+        {
+            juce::AudioBuffer<float> buffer (2, 512);
+            juce::MidiBuffer midi;
+            float bestL = 0.0f, bestR = 0.0f;
+            int indexL = -1, indexR = -1;
+            for (int block = 0; block < 190; ++block)       // about 2 s
+            {
+                buffer.clear();
+                if (block == 0)
+                {
+                    buffer.setSample (0, 100, 0.5f);
+                    buffer.setSample (1, 100, 0.5f);
+                }
+                p.processBlock (buffer, midi);
+                for (int i = 0; i < 512; ++i)
+                {
+                    const float a = std::abs (buffer.getSample (0, i)), b = std::abs (buffer.getSample (1, i));
+                    if (a > bestL) { bestL = a; indexL = block * 512 + i; }
+                    if (b > bestR) { bestR = b; indexR = block * 512 + i; }
+                }
+            }
+            left = bestL > 0.01f ? (indexL - 100) / 48000.0 : -1.0;
+            right = bestR > 0.01f ? (indexR - 100) / 48000.0 : -1.0;
+        };
+
+        // "431 ms" or "1.31 s" back into seconds
+        auto seconds = [] (const juce::String& text)
+        {
+            return text.endsWith (" ms") ? text.upToFirstOccurrenceOf (" ", false, false).getDoubleValue() / 1000.0
+                                         : text.upToFirstOccurrenceOf (" ", false, false).getDoubleValue();
+        };
+
+        auto fresh = [] (MimicPhonProcessor& p)
+        {
+            p.setPlayConfigDetails (2, 2, 48000.0, 512);
+            p.prepareToPlay (48000.0, 512);
+            resetAll (p);
+            setParameter (p, MphParams::mix, 1.0f);          // only the repeats are heard
+            setParameter (p, MphParams::repeats, 0.0f);      // one echo
+        };
+
+        // Skew off: both sides read the same as before
+        {
+            MimicPhonProcessor p;
+            fresh (p);
+            MimicPhonEditor editor (p);
+            editor.setSize (1200, 800);
+            auto* panel = editor.getStyledPanel();
+            if (panel != nullptr)
+            {
+                processSeconds (p, 0.1, 480);
+                panel->refreshNow();
+                auto r = panel->getReadout();
+                expect (r.delayLeft == "653 ms" && r.delayRight == "653 ms" && r.rateText == "653 ms" && ! r.skewed,
+                        "Skew off: L and R both read 653 ms, as before");
+                expect (panel->pingButtonText() == "PING PONG / SWAP", "Ping Pong off: the button says PING PONG / SWAP");
+            }
+        }
+
+        // Skew on at 12:00 (no split), then Rate clockwise: L faster, R slower; read-outs equal the measured echoes
+        {
+            MimicPhonProcessor p;
+            fresh (p);
+            setParameter (p, MphParams::skew, 1.0f);
+            processSeconds (p, 0.1, 480);                    // Skew goes on with Rate at 12:00
+            MimicPhonEditor editor (p);
+            editor.setSize (1200, 800);
+            auto* panel = editor.getStyledPanel();
+            if (panel != nullptr)
+            {
+                panel->refreshNow();
+                auto r = panel->getReadout();
+                expect (r.delayLeft == "653 ms" && r.delayRight == "653 ms" && ! r.skewed, "Skew on at 12:00: no split, L and R both 653 ms");
+
+                setParameter (p, MphParams::rate, 0.8f);
+                processSeconds (p, 0.1, 480);
+                panel->refreshNow();
+                r = panel->getReadout();
+                expect (r.skewed && r.rateText.startsWith ("L faster"), "Skew on, Rate clockwise: the Rate knob says L faster");
+                expect (seconds (r.delayLeft) < seconds (r.delayRight), "Skew on, Rate clockwise: the read-out has L shorter than R");
+                expect (r.delayLeft == "431 ms" && r.delayRight == "990 ms", "Skew on, Rate at 0.8 in Zone 4: L 431 ms, R 990 ms");
+                expect (panel->pingButtonText() == "PING PONG / SWAP", "Skew on, Ping Pong off: the button still says PING PONG / SWAP");
+
+                // the sound: a fresh run with the same settings, echo times heard on each side
+                MimicPhonProcessor heard;
+                fresh (heard);
+                setParameter (heard, MphParams::skew, 1.0f);
+                processSeconds (heard, 0.1, 480);                  // Skew goes on with Rate at 12:00 ...
+                setParameter (heard, MphParams::rate, 0.8f);       // ... then Rate is turned
+                processSeconds (heard, 1.5, 480);                  // and given time to settle (the glide)
+                double left = -1, right = -1;
+                echoTimes (heard, left, right);
+                expect (std::abs (left - seconds (r.delayLeft)) < 0.003 && std::abs (right - seconds (r.delayRight)) < 0.003,
+                        "Skew: the echo times heard on L and R match the read-out");
+            }
+        }
+
+        // Ping Pong (not skewed): the read-out shows the hop (half the time) and the button says PING PONG; the first echo is half the time
+        {
+            MimicPhonProcessor p;
+            fresh (p);
+            setParameter (p, MphParams::pingPong, 1.0f);
+            processSeconds (p, 0.1, 480);
+            MimicPhonEditor editor (p);
+            editor.setSize (1200, 800);
+            auto* panel = editor.getStyledPanel();
+            if (panel != nullptr)
+            {
+                panel->refreshNow();
+                const auto r = panel->getReadout();
+                expect (std::abs (seconds (r.delayLeft) - 0.3265) < 0.001 && r.delayLeft == r.delayRight, "Ping Pong: each hop reads half of 653 ms");
+                expect (r.rateText == "653 ms", "Ping Pong: the Rate knob still reads the delay time it sets (653 ms)");
+                expect (panel->pingButtonText() == "PING PONG", "Ping Pong on, not skewed: the button says PING PONG");
+                expect (r.pingFlashing, "Ping Pong on: the Zone window flashes");
+                MimicPhonProcessor heard;
+                fresh (heard);
+                setParameter (heard, MphParams::pingPong, 1.0f);
+                double left = -1, right = -1;
+                echoTimes (heard, left, right);
+                expect (std::abs (left - 0.3265) < 0.003 && right < 0.0, "Ping Pong: the first echo is heard on the left after the hop (327 ms), the right is still silent");
+            }
+        }
+
+        // Swap (skewed): the button says SWAP, the times are the Skew times (no hop)
+        {
+            MimicPhonProcessor p;
+            fresh (p);
+            setParameter (p, MphParams::skew, 1.0f);
+            processSeconds (p, 0.1, 480);
+            setParameter (p, MphParams::rate, 0.8f);
+            setParameter (p, MphParams::pingPong, 1.0f);
+            processSeconds (p, 0.1, 480);
+            MimicPhonEditor editor (p);
+            editor.setSize (1200, 800);
+            auto* panel = editor.getStyledPanel();
+            if (panel != nullptr)
+            {
+                panel->refreshNow();
+                const auto r = panel->getReadout();
+                expect (panel->pingButtonText() == "SWAP", "Skew on and the button on: it says SWAP");
+                expect (r.delayLeft == "431 ms" && r.delayRight == "990 ms", "Swap: L and R read the Skew times (no hop)");
+                expect (r.pingFlashing, "Swap: the Zone window flashes");
+            }
+        }
+
+        // Skew off after turning Rate: the split stays in the read-out, and the Rate knob moves both sides
+        {
+            MimicPhonProcessor p;
+            fresh (p);
+            setParameter (p, MphParams::skew, 1.0f);
+            processSeconds (p, 0.1, 480);
+            setParameter (p, MphParams::rate, 0.7f);
+            processSeconds (p, 0.1, 480);
+            setParameter (p, MphParams::skew, 0.0f);
+            processSeconds (p, 0.1, 480);
+            MimicPhonEditor editor (p);
+            editor.setSize (1200, 800);
+            auto* panel = editor.getStyledPanel();
+            if (panel != nullptr)
+            {
+                panel->refreshNow();
+                const auto before = panel->getReadout();
+                expect (before.skewed && seconds (before.delayLeft) < seconds (before.delayRight), "Skew off after turning Rate: the split is still in the read-out");
+                setParameter (p, MphParams::rate, 0.6f);
+                processSeconds (p, 0.1, 480);
+                panel->refreshNow();
+                const auto after = panel->getReadout();
+                expect (seconds (after.delayLeft) < seconds (before.delayLeft) && seconds (after.delayRight) < seconds (before.delayRight),
+                        "Skew off: Rate counter-clockwise shortens both sides");
+                const double ratioBefore = seconds (before.delayRight) / seconds (before.delayLeft);
+                const double ratioAfter = seconds (after.delayRight) / seconds (after.delayLeft);
+                expect (std::abs (ratioBefore - ratioAfter) < 0.05, "Skew off: the split (the ratio between the sides) stays when Rate moves");
+                // on and off once with Rate untouched clears it
+                setParameter (p, MphParams::skew, 1.0f);
+                processSeconds (p, 0.1, 480);
+                setParameter (p, MphParams::skew, 0.0f);
+                processSeconds (p, 0.1, 480);
+                panel->refreshNow();
+                const auto cleared = panel->getReadout();
+                expect (! cleared.skewed && cleared.delayLeft == cleared.delayRight, "Skew on and off with Rate untouched: the split is cleared");
+            }
+        }
+
+        // The plain window carries the same buttons and controls (nothing was added or removed)
+        expect (proc.getParameters().size() == 21, "still 21 parameters: no control id was added or removed");
+    }
+
+    // ---------------- a picture with Skew pulling L and R apart and Swap on (its own plugin object: the audio has to run for the engine to know) ----------------
+    {
+        MimicPhonProcessor swapProc;
+        swapProc.setPlayConfigDetails (2, 2, 48000.0, 512);
+        swapProc.prepareToPlay (48000.0, 512);
+        resetAll (swapProc);
+        MimicPhonEditor swapEditor (swapProc);
+        swapEditor.showView (MimicPhonEditor::View::styled);
+        swapEditor.setSize (1200, 800);
+        setParameter (swapProc, MphParams::skew, 1.0f);
+        processSeconds (swapProc, 0.1, 480);                  // Skew goes on with Rate at 12:00
+        setParameter (swapProc, MphParams::rate, 0.8f);
+        setParameter (swapProc, MphParams::pingPong, 1.0f);
+        processSeconds (swapProc, 0.3, 480);
+        letWindowThreadRun (150);
+        save (swapEditor, outDir.getChildFile ("styled_panel_swap.png"), 1.0f);
+    }
+
     // ---------------- the pictures ----------------
     {
         resetAll (proc);

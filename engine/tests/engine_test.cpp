@@ -1,6 +1,7 @@
 // Self-test of the engine (control list, tempo clock, level helpers, the Zone / Rate time map and the counters behind the window's lights;
 // milestone 4 adds the repeater: dry path, levels, Mix, echoes in every Zone, Repeats, saturation, Zone jumps, Rate glide, Clear, tail;
-// milestone 5 adds Color: the knob's law, unity bit for bit, dark and thin, each echo shaped once more, stability, no clicks).
+// milestone 5 adds Color: the knob's law, unity bit for bit, dark and thin, each echo shaped once more, stability, no clicks;
+// milestone 6 adds Skew, Ping Pong and Swap: the rules, the echo times heard on each side, the routing, stability, no clicks).
 // Prints "engine tests: N checks, F failed" and exits with 0 only if nothing failed.
 
 #include <mph/Engine.h>
@@ -8,6 +9,7 @@
 #include <mph/core/Color.h>
 #include <mph/core/Gain.h>
 #include <mph/core/HostClock.h>
+#include <mph/core/Skew.h>
 #include <mph/core/ZoneMap.h>
 
 #include <cmath>
@@ -1210,6 +1212,497 @@ namespace
             expect (biggest == 0.0f, "Clear with a dark Color: nothing rings on afterwards");
         }
     }
+    // ---- milestone 6: Skew, Ping Pong, Swap ----
+    // Where the strongest sound in a window of a signal is (sample index), or -1 if it is silent.
+    int echoAt (const std::vector<float>& v, int from, int to, float threshold = 0.05f)
+    {
+        float best = 0.0f;
+        int index = -1;
+        for (int i = from; i < to && i < (int) v.size(); ++i)
+            if (std::fabs (v[(size_t) i]) > best)
+            {
+                best = std::fabs (v[(size_t) i]);
+                index = i;
+            }
+        return best >= threshold ? index : -1;
+    }
+
+    // A click at sample 100 on the left and/or the right, Mix fully right, then everything is read back.
+    struct Heard { std::vector<float> l, r; };
+    Heard clickThrough (mph::Params p, bool clickLeft, bool clickRight, int samples, int block = 512, double sr = 48000.0)
+    {
+        mph::Engine e;
+        e.prepare (sr, block, 2);
+        e.setParams (p);
+        Heard h;
+        h.l.assign ((size_t) samples, 0.0f);
+        h.r.assign ((size_t) samples, 0.0f);
+        if (clickLeft) h.l[100] = 0.5f;
+        if (clickRight) h.r[100] = 0.5f;
+        // the parameters are set once; setParams is repeated every block as the plugin does
+        for (int done = 0; done < samples; done += block)
+        {
+            const int n = std::min (block, samples - done);
+            e.setParams (p);
+            float* chans[2] = { h.l.data() + done, h.r.data() + done };
+            e.process (chans, 2, n);
+        }
+        return h;
+    }
+
+    void testSkewRules()
+    {
+        using mph::core::SkewState;
+        using mph::core::ChannelRates;
+
+        // Not engaged: both sides are the Rate knob.
+        {
+            SkewState s;
+            s.update (false, 0.3f);
+            const auto r = s.ratesNow (0.3f);
+            expect (r.left == r.right && std::fabs (r.left - 0.3f) < 1.0e-6f, "Skew off: both sides follow the Rate knob");
+            expect (! s.skewed, "Skew off: not skewed");
+        }
+        // Engaged at 12:00: no split; Rate clockwise: left shorter (faster), right longer (slower)
+        {
+            SkewState s;
+            s.update (true, 0.5f);
+            auto r = s.ratesNow (0.5f);
+            expect (std::fabs (r.left - 0.5f) < 1.0e-6f && std::fabs (r.right - 0.5f) < 1.0e-6f && ! s.skewed, "Skew on at 12:00: no skew");
+            s.update (true, 0.8f);
+            r = s.ratesNow (0.8f);
+            expect (r.left < 0.5f && r.right > 0.5f, "Skew on, Rate clockwise: left faster (shorter), right slower (longer)");
+            expect (std::fabs ((0.5f - r.left) - (r.right - 0.5f)) < 1.0e-6f, "the two sides move apart by the same amount");
+            expect (s.skewed, "a 0.3 turn is skewed");
+            s.update (true, 0.2f);
+            r = s.ratesNow (0.2f);
+            expect (r.left > 0.5f && r.right < 0.5f, "Skew on, Rate counter-clockwise: left slower, right faster");
+            s.update (true, 1.0f);
+            r = s.ratesNow (1.0f);
+            expect (std::fabs (r.left - 0.0f) < 1.0e-6f && std::fabs (r.right - 1.0f) < 1.0e-6f, "Skew fully clockwise from the middle: left at the shortest time, right at the longest");
+            s.update (true, 0.0f);
+            r = s.ratesNow (0.0f);
+            expect (std::fabs (r.left - 1.0f) < 1.0e-6f && std::fabs (r.right - 0.0f) < 1.0e-6f, "Skew fully counter-clockwise: the other way round");
+        }
+        // Skew off after turning Rate: nothing jumps, the split stays, Rate then moves both sides together
+        {
+            SkewState s;
+            s.update (true, 0.5f);
+            s.update (true, 0.7f);
+            const auto before = s.ratesNow (0.7f);
+            s.update (false, 0.7f);
+            const auto after = s.ratesNow (0.7f);
+            expect (std::fabs (before.left - after.left) < 1.0e-5f && std::fabs (before.right - after.right) < 1.0e-5f, "Skew off: the delay times do not move");
+            expect (s.skewed, "Skew off after turning Rate: the split is kept");
+            const float gap = after.right - after.left;
+            const auto later = s.ratesNow (0.55f);
+            expect (std::fabs ((later.right - later.left) - gap) < 1.0e-5f, "Rate moves both sides together, the gap stays the same");
+            expect (later.left < after.left && later.right < after.right, "Rate counter-clockwise moves both sides shorter");
+            // the jump flag: engaging at 12:00 and turning is no jump, a pure hold is no jump
+            expect (! s.takeJump(), "no jump for engaging at 12:00, turning and letting go");
+        }
+        // On and off with Rate untouched clears the split and brings the sides together
+        {
+            SkewState s;
+            s.update (true, 0.5f);
+            s.update (true, 0.8f);
+            s.update (false, 0.8f);
+            expect (s.skewed, "a split exists before clearing");
+            s.takeJump();
+            s.update (true, 0.8f);                 // on again ...
+            s.update (false, 0.8f);                // ... and off with Rate untouched
+            expect (! s.skewed, "on and off with Rate untouched: the split is cleared");
+            const auto r = s.ratesNow (0.8f);
+            expect (std::fabs (r.left - r.right) < 1.0e-6f && std::fabs (r.left - 0.8f) < 1.0e-6f, "after clearing both sides follow the Rate knob again");
+            expect (s.takeJump(), "clearing a split is a jump (the engine crossfades)");
+        }
+        // Engaging with Rate away from 12:00 is skewed at once and is a jump
+        {
+            SkewState s;
+            s.update (false, 0.8f);
+            s.update (true, 0.8f);
+            expect (s.skewed, "Skew on with Rate at 0.8: skewed at once (12:00 = no skew, absolute)");
+            expect (s.takeJump(), "... and that is a jump");
+        }
+        // The two sides stay inside the knob range
+        {
+            SkewState s;
+            s.update (true, 0.9f);
+            s.update (true, 1.0f);
+            const auto r = s.ratesNow (1.0f);
+            expect (r.left >= 0.0f && r.right <= 1.0f && r.right > r.left, "the sides never leave the knob range");
+        }
+        // Hysteresis: tiny skew near 12:00 does not flutter between Ping Pong and Swap
+        {
+            SkewState s;
+            s.update (true, 0.5f);
+            s.update (true, 0.52f);
+            expect (s.skewed, "a 0.02 turn is skewed");
+            s.update (true, 0.507f);
+            expect (s.skewed, "0.007 is still skewed (hysteresis)");
+            s.update (true, 0.502f);
+            expect (! s.skewed, "0.002 is not skewed");
+            s.update (true, 0.508f);
+            expect (! s.skewed, "0.008 is not skewed yet (hysteresis)");
+        }
+        // The button's meaning
+        {
+            SkewState plain, skewed;
+            skewed.update (true, 0.5f);
+            skewed.update (true, 0.9f);
+            expect (mph::core::pingMode (false, true, skewed) == mph::core::PingMode::off, "button off: no Ping Pong, no Swap");
+            expect (mph::core::pingMode (true, true, plain) == mph::core::PingMode::pingPong, "button on, sides together: Ping Pong");
+            expect (mph::core::pingMode (true, true, skewed) == mph::core::PingMode::swap, "button on, sides skewed: Swap");
+            expect (mph::core::pingMode (true, false, plain) == mph::core::PingMode::off, "mono: no Ping Pong");
+        }
+    }
+
+    void testSkewSound()
+    {
+        const double sr = 48000.0;
+
+        // Skew off: both sides are the same delay, as before (a click on each side comes back on its own side)
+        {
+            mph::Params p = repeatsOnly (2, rateForDelay (2, 0.2), 0.0f);
+            const auto h = clickThrough (p, true, false, 48000);
+            const int il = echoAt (h.l, 0, (int) h.l.size()), ir = echoAt (h.r, 0, (int) h.r.size());
+            expect (il > 0 && std::fabs ((il - 100) / sr - 0.2) < 0.001 && ir < 0, "Skew off: a left click echoes on the left only, after the delay");
+        }
+
+        // Skew on, Rate clockwise: left echo comes sooner than right
+        {
+            mph::Params p = repeatsOnly (2, 0.8f, 0.0f);       // Rate at 0.8 with Skew engaged at once: centre 0.8, skew 0.3
+            p.skew = true;
+            const auto left = clickThrough (p, true, false, 96000);
+            const auto right = clickThrough (p, false, true, 96000);
+            const int il = echoAt (left.l, 0, (int) left.l.size()), ir = echoAt (right.r, 0, (int) right.r.size());
+            const double wantLeft = mph::core::freeDelaySeconds (2, 0.8f - 0.3f), wantRight = mph::core::freeDelaySeconds (2, 1.0f);
+            expect (il > 0 && std::fabs ((il - 100) / sr - wantLeft) < 0.002, "Skew on: the left echo is at the left side's time");
+            expect (ir > 0 && std::fabs ((ir - 100) / sr - wantRight) < 0.002, "Skew on: the right echo is at the right side's time");
+            expect (il < ir, "Rate clockwise: left sooner (faster), right later (slower)");
+        }
+
+        // Skew on at 12:00: both sides equal
+        {
+            mph::Params p = repeatsOnly (3, 0.5f, 0.0f);
+            p.skew = true;
+            const auto left = clickThrough (p, true, false, 96000);
+            const auto right = clickThrough (p, false, true, 96000);
+            const int il = echoAt (left.l, 0, (int) left.l.size()), ir = echoAt (right.r, 0, (int) right.r.size());
+            expect (il > 0 && il == ir, "Skew on at 12:00: both sides have the same time");
+        }
+
+        // Skew then Skew off: the split stays and Rate moves both together (measured by following the engine through the button presses)
+        {
+            mph::Engine e;
+            e.prepare (sr, 512, 2);
+            mph::Params p = repeatsOnly (3, 0.5f, 0.0f);
+            std::vector<float> l (4096, 0.0f), r (4096, 0.0f);
+            p.skew = true;
+            e.setParams (p);
+            for (int i = 0; i < 4; ++i) { processAll (e, l, &r, 512); }
+            p.rate = 0.8f;                             // turn Rate clockwise with Skew on
+            e.setParams (p);
+            processAll (e, l, &r, 512);
+            p.skew = false;                            // Skew off: split stays
+            e.setParams (p);
+            processAll (e, l, &r, 512);
+            const auto before = e.getSkewState().ratesNow (p.rate);
+            p.rate = 0.7f;                             // Rate now moves both sides together (a small move, so neither side meets the end of the knob)
+            e.setParams (p);
+            const auto after = e.getSkewState().ratesNow (p.rate);
+            expect (std::fabs ((after.right - after.left) - (before.right - before.left)) < 1.0e-5f, "engine: with Skew off the split stays when Rate moves");
+            expect (after.left < before.left && after.right < before.right, "engine: with Skew off Rate moves both sides together");
+        }
+
+        // The reported delay (what the window shows) follows the sides
+        {
+            mph::Engine e;
+            e.prepare (sr, 512, 2);
+            mph::Params p = repeatsOnly (4, 0.8f, 0.0f);
+            p.skew = true;
+            e.setParams (p);
+            const auto s = e.getSkewState();
+            const auto rr = s.ratesNow (p.rate);
+            expect (s.engaged && s.skewed && rr.left < rr.right, "engine: the published Skew memory is what the window needs");
+        }
+    }
+
+    void testPingPong()
+    {
+        const double sr = 48000.0;
+
+        // Ping Pong: both inputs summed to mono into the left; repeats bounce left, right, left ... each hop half the delay time
+        {
+            mph::Params p = repeatsOnly (3, rateForDelay (3, 0.4), 0.83f);       // delay 0.4 s, infinite
+            p.pingPong = true;
+            const auto h = clickThrough (p, true, false, 192000);
+            const double hop = 0.2;
+            // first echo: left, after half the delay time
+            const int first = echoAt (h.l, 0, (int) (0.3 * sr), 0.02f);
+            expect (first > 0 && std::fabs ((first - 100) / sr - hop) < 0.002, "Ping Pong: the first echo is on the left after half the delay time");
+            expect (echoAt (h.r, 0, (int) (0.3 * sr), 0.02f) < 0, "Ping Pong: nothing on the right before the second hop");
+            // second echo: right, one delay time after the click
+            const int second = echoAt (h.r, (int) (0.3 * sr), (int) (0.5 * sr), 0.02f);
+            expect (second > 0 && std::fabs ((second - 100) / sr - 2 * hop) < 0.002, "Ping Pong: the second echo is on the right, one hop later");
+            // third: left again
+            const int third = echoAt (h.l, (int) (0.5 * sr), (int) (0.7 * sr), 0.02f);
+            expect (third > 0 && std::fabs ((third - 100) / sr - 3 * hop) < 0.002, "Ping Pong: the third echo is back on the left");
+            expect (echoAt (h.l, (int) (0.3 * sr), (int) (0.5 * sr), 0.02f) < 0, "Ping Pong: nothing on the left while the echo is on the right");
+        }
+
+        // A click on the RIGHT input only is also heard, starting on the left (inputs are summed to mono, left side first)
+        {
+            mph::Params p = repeatsOnly (3, rateForDelay (3, 0.4), 0.0f);
+            p.pingPong = true;
+            const auto h = clickThrough (p, false, true, 96000);
+            const int first = echoAt (h.l, 0, 96000, 0.02f);
+            expect (first > 0 && std::fabs ((first - 100) / sr - 0.2) < 0.002 && echoAt (h.r, 0, 96000, 0.02f) < 0,
+                    "Ping Pong: a right-only click is summed to mono and the echo starts on the left");
+        }
+
+        // Mono sum is a mean, so the same click on both inputs comes back at the same level as one echo of a mono signal
+        {
+            mph::Params p = repeatsOnly (3, rateForDelay (3, 0.4), 0.0f);
+            p.pingPong = true;
+            const auto both = clickThrough (p, true, true, 96000);
+            const auto one = clickThrough (p, true, false, 96000);
+            const int ib = echoAt (both.l, 0, 96000, 0.02f), io = echoAt (one.l, 0, 96000, 0.02f);
+            expect (ib > 0 && io > 0 && std::fabs (both.l[(size_t) ib]) > 1.9f * std::fabs (one.l[(size_t) io]) * 0.5f
+                    && std::fabs (both.l[(size_t) ib] - 0.5f * std::fabs (both.l[(size_t) ib]) * 2.0f) < 1.0f,
+                    "Ping Pong: inputs are averaged into the left side");
+            expect (std::fabs (std::fabs (both.l[(size_t) ib]) - 0.5f) < 0.02f && std::fabs (std::fabs (one.l[(size_t) io]) - 0.25f) < 0.02f,
+                    "Ping Pong: the same click on both inputs echoes at full level, a click on one input at half (a mean)");
+        }
+
+        // The dry signal stays stereo (Mix fully left is still bit for bit)
+        {
+            mph::Engine e;
+            e.prepare (48000.0, 512, 2);
+            mph::Params p;
+            p.mix = 0.0f;
+            p.pingPong = true;
+            e.setParams (p);
+            std::vector<float> l (4096), r (4096);
+            std::mt19937 rng (3);
+            std::uniform_real_distribution<float> noise (-1.0f, 1.0f);
+            for (auto& s : l) s = noise (rng);
+            for (auto& s : r) s = noise (rng);
+            const auto l0 = l, r0 = r;
+            processAll (e, l, &r, 512);
+            expect (identical (l, l0) && identical (r, r0), "Ping Pong with Mix fully left: the stereo input comes out exactly as it went in");
+        }
+
+        // Swap: skewed, the feedback paths are swapped (left echo goes on to the right side, whose time is longer), inputs stay stereo
+        {
+            mph::Params p = repeatsOnly (3, 0.8f, 0.83f);
+            p.skew = true;
+            p.pingPong = true;                         // skewed: Swap
+            const auto h = clickThrough (p, true, false, 192000);
+            const double dl = mph::core::freeDelaySeconds (3, 0.5f), dr = mph::core::freeDelaySeconds (3, 1.0f);
+            const int first = echoAt (h.l, 0, (int) (dl * sr + 2000), 0.02f);
+            expect (first > 0 && std::fabs ((first - 100) / sr - dl) < 0.002, "Swap: the first echo is on the left at the left side's time (inputs stay stereo)");
+            const int second = echoAt (h.r, 0, (int) ((dl + dr) * sr + 4000), 0.02f);
+            expect (second > 0 && std::fabs ((second - 100) / sr - (dl + dr)) < 0.003, "Swap: the left echo feeds the right side: it comes back on the right after both times");
+            expect (echoAt (h.r, 0, (int) (dl * sr + 1000), 0.02f) < 0, "Swap: nothing reaches the right before both times have passed");
+        }
+
+        // Without Ping Pong a click stays on its own side, forever (no crossing)
+        {
+            mph::Params p = repeatsOnly (3, rateForDelay (3, 0.2), 0.83f);
+            const auto h = clickThrough (p, true, false, 96000);
+            float biggestRight = 0.0f;
+            for (float s : h.r) biggestRight = std::max (biggestRight, std::fabs (s));
+            expect (biggestRight == 0.0f, "Ping Pong off: nothing leaks to the other side");
+        }
+
+        // Mono: Skew and Ping Pong / Swap do nothing and do not crash
+        {
+            mph::Engine e;
+            e.prepare (48000.0, 512, 1);
+            mph::Params p = repeatsOnly (3, rateForDelay (3, 0.2), 0.0f);
+            p.skew = true;
+            p.pingPong = true;
+            p.rate = 0.8f;
+            e.setParams (p);
+            std::vector<float> l (48000, 0.0f);
+            l[100] = 0.5f;
+            processAll (e, l, nullptr, 512);
+            const int i = echoAt (l, 0, 48000, 0.05f);
+            expect (i > 0 && std::fabs ((i - 100) / 48000.0 - mph::core::freeDelaySeconds (3, 0.8f)) < 0.003, "mono: Skew and Ping Pong do nothing (the delay is the Rate knob's)");
+        }
+    }
+
+    // Stability and smoothness
+    void testSkewStability()
+    {
+        std::mt19937 rng (777);
+        std::uniform_real_distribution<float> noise (-1.0f, 1.0f);
+        std::uniform_real_distribution<float> knob (0.0f, 1.0f);
+
+        // Random button presses and knob moves at infinite and beyond: finite, bounded, always
+        for (int zone : { 0, 1, 3, 5 })
+            for (float repeats : { 0.83f, 1.0f })
+            {
+                mph::Engine e;
+                e.prepare (48000.0, 256, 2);
+                std::vector<float> l (256), r (256);
+                float biggest = 0.0f;
+                bool finite = true;
+                mph::Params p = repeatsOnly (zone, 0.5f, repeats);
+                for (int block = 0; block < 1500; ++block)
+                {
+                    if (block % 40 == 0) p.skew = (rng() & 1);
+                    if (block % 55 == 0) p.pingPong = (rng() & 1);
+                    if (block % 17 == 0) p.rate = knob (rng);
+                    if (block % 90 == 0) p.zone = (int) (knob (rng) * 7.99f);
+                    e.setParams (p);
+                    for (int i = 0; i < 256; ++i)
+                    {
+                        l[(size_t) i] = block < 40 ? 0.5f * noise (rng) : 0.0f;
+                        r[(size_t) i] = block < 40 ? 0.5f * noise (rng) : 0.0f;
+                    }
+                    float* chans[2] = { l.data(), r.data() };
+                    e.process (chans, 2, 256);
+                    for (int i = 0; i < 256; ++i)
+                    {
+                        finite = finite && std::isfinite (l[(size_t) i]) && std::isfinite (r[(size_t) i]);
+                        biggest = std::max ({ biggest, std::fabs (l[(size_t) i]), std::fabs (r[(size_t) i]) });
+                    }
+                }
+                expect (finite && biggest < 1.5f, "random Skew / Ping Pong / Rate / Zone moves at infinite and beyond: finite and bounded");
+            }
+
+        // No click when Ping Pong goes on and off with a steady sound running through the repeats
+        {
+            const double sr = 48000.0;
+            mph::Engine e;
+            e.prepare (sr, 480, 2);
+            mph::Params p = repeatsOnly (2, rateForDelay (2, 0.25), 0.5f);
+            p.mix = 0.5f;
+            std::vector<float> l (480), r (480);
+            double phase = 0.0;
+            float biggestStep = 0.0f, previous = 0.0f;
+            for (int block = 0; block < 400; ++block)
+            {
+                if (block == 120) p.pingPong = true;
+                if (block == 260) p.pingPong = false;
+                e.setParams (p);
+                for (int i = 0; i < 480; ++i)
+                {
+                    const float s = (float) (0.3 * std::sin (phase));
+                    phase += 2.0 * 3.14159265358979 * 220.0 / sr;
+                    l[(size_t) i] = r[(size_t) i] = s;
+                }
+                float* chans[2] = { l.data(), r.data() };
+                e.process (chans, 2, 480);
+                if (block >= 100)
+                    for (int i = 0; i < 480; ++i)
+                    {
+                        biggestStep = std::max (biggestStep, std::fabs (l[(size_t) i] - previous));
+                        previous = l[(size_t) i];
+                    }
+            }
+            expect (biggestStep < 0.2f, "Ping Pong on and off over a steady tone: no click");
+        }
+
+        // No click when Skew goes on (away from 12:00) and when it is cleared: the engine crossfades
+        {
+            const double sr = 48000.0;
+            mph::Engine e;
+            e.prepare (sr, 480, 2);
+            mph::Params p = repeatsOnly (2, 0.8f, 0.5f);
+            std::vector<float> l (480), r (480);
+            double phase = 0.0;
+            float biggestStep = 0.0f, previous = 0.0f;
+            for (int block = 0; block < 400; ++block)
+            {
+                if (block == 120) p.skew = true;
+                if (block == 220) p.skew = false;      // untouched: clears
+                e.setParams (p);
+                for (int i = 0; i < 480; ++i)
+                {
+                    const float s = (float) (0.3 * std::sin (phase));
+                    phase += 2.0 * 3.14159265358979 * 220.0 / sr;
+                    l[(size_t) i] = r[(size_t) i] = s;
+                }
+                float* chans[2] = { l.data(), r.data() };
+                e.process (chans, 2, 480);
+                if (block >= 100)
+                    for (int i = 0; i < 480; ++i)
+                    {
+                        biggestStep = std::max (biggestStep, std::fabs (l[(size_t) i] - previous));
+                        previous = l[(size_t) i];
+                    }
+            }
+            expect (biggestStep < 0.2f, "Skew on away from 12:00 and cleared again over a steady tone: no click");
+        }
+
+        // Block size makes no difference to where the echoes are
+        {
+            mph::Params p = repeatsOnly (3, 0.8f, 0.5f);
+            p.skew = true;
+            p.pingPong = true;
+            const auto a = clickThrough (p, true, true, 96000, 64);
+            const auto b = clickThrough (p, true, true, 96000, 1000);
+            const int ia = echoAt (a.l, 0, 96000, 0.01f), ib = echoAt (b.l, 0, 96000, 0.01f);
+            expect (ia > 0 && ia == ib, "block size 64 or 1000: the same Swap echo time");
+        }
+
+        // The sample rate makes no difference to the time
+        for (double sr : { 44100.0, 96000.0, 192000.0 })
+        {
+            mph::Params p = repeatsOnly (3, 0.8f, 0.0f);
+            p.skew = true;
+            const auto h = clickThrough (p, true, true, (int) (sr * 1.2), 512, sr);
+            const int il = echoAt (h.l, 0, (int) (sr * 1.2), 0.05f), ir = echoAt (h.r, 0, (int) (sr * 1.2), 0.05f);
+            expect (il > 0 && ir > 0 && std::fabs ((il - 100) / sr - mph::core::freeDelaySeconds (3, 0.5f)) < 0.003
+                    && std::fabs ((ir - 100) / sr - mph::core::freeDelaySeconds (3, 1.0f)) < 0.003,
+                    "Skew gives the same times at 44.1 / 96 / 192 kHz");
+        }
+
+        // Clear empties both sides, also with Ping Pong running
+        {
+            mph::Engine e;
+            e.prepare (48000.0, 512, 2);
+            mph::Params p = repeatsOnly (1, rateForDelay (1, 0.03), 0.83f);
+            p.pingPong = true;
+            e.setParams (p);
+            std::vector<float> l (48000), r (48000);
+            for (auto& s : l) s = noise (rng) * 0.3f;
+            processAll (e, l, &r, 512);
+            p.clear = true;
+            e.setParams (p);
+            std::vector<float> ql (512, 0.0f), qr (512, 0.0f);
+            processAll (e, ql, &qr, 512);
+            p.clear = false;
+            e.setParams (p);
+            std::vector<float> al (48000, 0.0f), ar (48000, 0.0f);
+            processAll (e, al, &ar, 512);
+            float biggest = 0.0f;
+            for (float s : ql) biggest = std::max (biggest, std::fabs (s));
+            for (float s : qr) biggest = std::max (biggest, std::fabs (s));
+            for (float s : al) biggest = std::max (biggest, std::fabs (s));
+            for (float s : ar) biggest = std::max (biggest, std::fabs (s));
+            expect (biggest == 0.0f, "Clear with Ping Pong running: nothing rings on afterwards");
+        }
+
+        // The RATE light counts both sides when they differ (more blinks than with one side)
+        {
+            auto blinks = [] (bool skew)
+            {
+                mph::Engine e;
+                e.prepare (48000.0, 512, 2);
+                mph::Params p = repeatsOnly (3, 0.8f, 0.0f);
+                p.skew = skew;
+                e.setParams (p);
+                std::vector<float> l (96000, 0.0f), r (96000, 0.0f);
+                processAll (e, l, &r, 512);
+                return e.getRateTickCount();
+            };
+            expect (blinks (true) > blinks (false), "the RATE light blinks for both sides when Skew splits them");
+        }
+    }
 }
 
 int main()
@@ -1230,6 +1723,10 @@ int main()
     testZoneMap();
     testLights();
     testColor();
+    testSkewRules();
+    testSkewSound();
+    testPingPong();
+    testSkewStability();
 
     std::printf ("engine tests: %d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;
