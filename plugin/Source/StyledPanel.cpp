@@ -1,6 +1,7 @@
 #include "StyledPanel.h"
 #include <mph/core/Color.h>
 #include <mph/core/Gain.h>
+#include <mph/core/Halo.h>
 #include <mph/core/HostClock.h>
 #include <mph/core/Repeats.h>
 #include <mph/core/URate.h>
@@ -63,6 +64,15 @@ namespace
     juce::String colorText (double value)
     {
         return mph::core::colorWord ((float) value);
+    }
+
+    // Halo: the word for the setting and the percentage, from the engine's own function ("off", "string 25 %", "tight verb 50 %", "wide hall 100 %")
+    juce::String haloText (double value)
+    {
+        const float knob = (float) value;
+        if (knob <= mph::core::kHaloDeadZone)
+            return "off";
+        return juce::String (mph::core::haloWord (knob)) + " " + juce::String (juce::roundToInt (value * 100.0)) + " %";
     }
 
     // uRate: what the knob does in the current Zone, from the engine's own rules (core/URate.h). Zone 0: pitch, in semitones (one volt
@@ -397,7 +407,8 @@ MimicPhonStyledPanel::MimicPhonStyledPanel (juce::AudioProcessorValueTreeState& 
     auto& input  = addKnob (MphParams::inputLevel,  "INPUT LEVEL",  levelText);
     addKnob (MphParams::mix, "MIX", mixText);
     auto& repeats = addKnob (MphParams::repeats,    "REPEATS", repeatsText);
-    addKnob (MphParams::halo, "HALO");
+    auto& halo = addKnob (MphParams::halo, "HALO", haloText);
+    halo.addNote ("OFF ... TIGHT ... WIDE", { 4, 186, 200, 24 }, juce::Justification::centred, 13.5f, false);
     addKnob (MphParams::outputLevel, "OUTPUT LEVEL", levelText);
 
     // Under Input Level: the four-step gain selector and "dB"

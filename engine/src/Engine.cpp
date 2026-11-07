@@ -57,6 +57,7 @@ void Engine::prepare (double newSampleRate, int newMaxBlockSize, int newNumChann
     colorFilter.prepare (sampleRate);
     colorApplied = -1.0f;
     colorCountdown = 0;
+    halo.prepare (sampleRate, numChannels);
 
     levelRelease = onePoleCoefficient (kLevellerReleaseSeconds, sampleRate);
     envRelease = (float) std::exp (-1.0 / (kLevellerReleaseSeconds * sampleRate));
@@ -136,7 +137,7 @@ void Engine::publishTargets()
     const float fb = core::repeatsToFeedback (params.repeats);
     delayShown.store ((float) delay);
     feedbackShown.store (fb);
-    tailShown.store ((float) core::tailSeconds (std::max (sides.left, sides.right), fb));
+    tailShown.store ((float) (core::tailSeconds (std::max (sides.left, sides.right), fb) + core::haloTailSeconds (params.halo)));
     skewEngagedShown.store (skew.engaged);
     skewSkewedShown.store (skew.skewed);
     skewCentreShown.store (skew.centre);
@@ -152,6 +153,7 @@ void Engine::clearRepeats()
     for (int c = 0; c < 2; ++c)
         dcIn[c] = dcOut[c] = levelEnv[c] = 0.0f, levelGain[c] = 1.0f;
     colorFilter.reset();
+    halo.reset();
 }
 
 void Engine::process (float* const* channels, int numChannels_, int numSamples)
@@ -222,6 +224,7 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
         feedback.target = fb;
     }
     colorKnob.target = (double) std::min (1.0f, std::max (0.0f, params.color));
+    halo.setKnob (params.halo);
 
     // uRate and its LFO: the knob and the LFO's swing glide (about 10 ms); the LFO runs free (Hz) or in note divisions of Logic's tempo.
     {
@@ -275,6 +278,8 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
         colorApplied = (float) colorKnob.value;
         colorFilter.setShape (core::colorShape (colorApplied));
         colorCountdown = kColorUpdateSamples;
+        halo.setTimbre (core::colorShape (colorApplied));
+        halo.snap();
         for (int c = 0; c < 2; ++c)
         {
             heads[c][0].logDelay = heads[c][0].logTarget = logLive[c];
@@ -329,7 +334,9 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
             if (colorNow != colorApplied)
             {
                 colorApplied = colorNow;
-                colorFilter.setShape (core::colorShape (colorNow));
+                const core::ColorShape shapeNow = core::colorShape (colorNow);
+                colorFilter.setShape (shapeNow);
+                halo.setTimbre (shapeNow);          // Color also sets Halo's timbre
             }
         }
 
@@ -372,8 +379,9 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
             }
         }
 
-        // First every side's repeat is read and prepared for feedback, then everything is written (Ping Pong and Swap cross the two).
-        float x[2] = { 0.0f, 0.0f }, wet[2] = { 0.0f, 0.0f }, fedBack[2] = { 0.0f, 0.0f };
+        // First every side's repeat is read (and its DC taken out); then Halo works on both sides' repeats; then each side's feedback is
+        // prepared; then everything is written (Ping Pong and Swap cross the two).
+        float x[2] = { 0.0f, 0.0f }, wet[2] = { 0.0f, 0.0f }, blocked[2] = { 0.0f, 0.0f }, fedBack[2] = { 0.0f, 0.0f };
         for (int c = 0; c < channelCount; ++c)
         {
             x[c] = channels[c][n];
@@ -385,15 +393,26 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
             if (fading)
                 wet[c] += fadePosition * (buffers[c].read (delayIncoming[c]) - wet[c]);
 
-            // What is fed back: the repeat, minus any DC, scaled by Repeats, kept from running away by the soft limiter.
-            float blocked = wet[c] - dcIn[c] + dcCoefficient * dcOut[c];
+            // The repeat minus any DC (what is fed back, and what Halo works on)
+            float b = wet[c] - dcIn[c] + dcCoefficient * dcOut[c];
             dcIn[c] = wet[c];
-            if (std::fabs (blocked) < 1.0e-20f)
-                blocked = 0.0f;
-            dcOut[c] = blocked;
-            // The leveller keeps the loop at a steady, clean level when it grows (beyond infinite, or loud material at infinite);
-            // the soft limiter is only the last safety.
-            float fed = blocked * fbG;
+            if (std::fabs (b) < 1.0e-20f)
+                b = 0.0f;
+            dcOut[c] = b;
+            blocked[c] = b;
+        }
+
+        // Halo (milestone 9): diffusion of the repeat that is heard. Off = nothing is touched, bit for bit.
+        float haloOut[2] = { 0.0f, 0.0f };
+        const bool haloOn = halo.process (blocked, haloOut);
+        const float haloLevel = haloOn ? halo.level() : 0.0f;
+        const float haloInject = haloOn ? halo.injection() : 0.0f;
+
+        for (int c = 0; c < channelCount; ++c)
+        {
+            // What is fed back: the repeat (and, at high Halo settings, its halo), scaled by Repeats, kept from running away by the leveller
+            // and the soft limiter.
+            float fed = (haloInject > 0.0f ? blocked[c] + haloInject * haloOut[c] : blocked[c]) * fbG;
             const float mag = std::fabs (fed);
             levelEnv[c] = std::max (mag, levelEnv[c] * envRelease);
             const float wanted = levelEnv[c] > kLevellerCeiling ? kLevellerCeiling / levelEnv[c] : 1.0f;
@@ -420,7 +439,8 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
             }
             buffers[c].write (colorFilter.process (c, live + returned));
 
-            channels[c][n] = (dryG * x[c] + wetG * wet[c]) * outG;
+            const float heard = haloOn ? core::haloMix (wet[c], haloOut[c], haloLevel) : wet[c];
+            channels[c][n] = (dryG * x[c] + wetG * heard) * outG;
         }
 
         if (fading)

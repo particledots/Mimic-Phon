@@ -11,7 +11,9 @@
 //   5. drives the real processor with audio the way Logic does: with Mix fully left the live signal comes out unchanged, bit for bit
 //      (mono and stereo, several block sizes); with Mix fully right the echo lands at the delay time the window shows, in every
 //      Zone; the repeats stay sane with every control at an extreme; Clear silences the repeats; the host is told the tail;
-//   6. checks saving and reloading, the Clear button switching itself off, and opening and closing the window while audio runs.
+//   6. checks saving and reloading, the Clear button switching itself off, and opening and closing the window while audio runs;
+//   7. (milestone 9) checks Halo: the card's words follow the engine's, and through the real processor Halo makes a tail with Repeats fully
+//      left and Mix fully right (Filter-Verb), is silent when fully left, and stays finite; picture styled_panel_halo.png.
 //
 // Usage: MimicPhonPreview <folder for the pictures>
 
@@ -19,6 +21,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include <mph/core/Color.h>
+#include <mph/core/Halo.h>
 
 #include <cmath>
 #include <cstring>
@@ -468,6 +471,21 @@ int main (int argc, char** argv)
             setParameter (p, MphParams::color, 0.6f);
             expect (cardText (MphParams::color) == "tape", "Color at 0.6 reads \"tape\"");
             setParameter (p, MphParams::color, 1.0f);
+
+            // Halo (milestone 9) reads the engine's own word and the percentage
+            expect (cardText (MphParams::halo) == "off" && mph::kDefaultHalo == 0.0f, "defaults: Halo reads \"off\"");
+            setParameter (p, MphParams::halo, 0.1f);
+            expect (cardText (MphParams::halo) == "glint 10 %", "Halo at 0.1 reads \"glint 10 %\"");
+            setParameter (p, MphParams::halo, 0.25f);
+            expect (cardText (MphParams::halo) == "string 25 %", "Halo at 0.25 reads \"string 25 %\"");
+            setParameter (p, MphParams::halo, 0.5f);
+            expect (cardText (MphParams::halo) == "tight verb 50 %", "Halo in the middle reads \"tight verb 50 %\" (the module's tight Karplus-like reverb)");
+            setParameter (p, MphParams::halo, 0.7f);
+            expect (cardText (MphParams::halo) == "room 70 %", "Halo at 0.7 reads \"room 70 %\"");
+            setParameter (p, MphParams::halo, 1.0f);
+            expect (cardText (MphParams::halo) == "wide hall 100 %", "Halo fully right reads \"wide hall 100 %\"");
+            setParameter (p, MphParams::halo, 0.0f);
+            expect (cardText (MphParams::halo) == "off", "Halo fully left reads \"off\" again");
             expect (cardText (MphParams::color) == "thin", "Color fully right reads \"thin\"");
             setParameter (p, MphParams::color, mph::core::kColorUnity);
             expect (cardText (MphParams::color) == juce::String (mph::core::colorWord (mph::core::kColorUnity)), "Color on unity reads the engine's word for unity");
@@ -854,6 +872,63 @@ int main (int argc, char** argv)
             }
         }
 
+        // ---- Halo (milestone 9) through the real processor: Filter-Verb (Repeats fully left, Mix fully right) ----
+        {
+            auto tailEnergy = [] (float halo, float color, double& peakLeftRight, bool& finite, int from = 800)
+            {
+                MimicPhonProcessor q;
+                q.setPlayConfigDetails (2, 2, 48000.0, 512);
+                q.prepareToPlay (48000.0, 512);
+                resetAll (q);
+                setParameter (q, MphParams::zone, 0.0f);          // the shortest delay: the echo is almost at once
+                setParameter (q, MphParams::rate, 0.0f);
+                setParameter (q, MphParams::mix, 1.0f);           // only the repeats
+                setParameter (q, MphParams::repeats, 0.0f);       // one echo
+                setParameter (q, MphParams::halo, halo);
+                setParameter (q, MphParams::color, color);
+                juce::AudioBuffer<float> buffer (2, 512);
+                juce::MidiBuffer midi;
+                double energy = 0.0;
+                float peakL = 0.0f, peakR = 0.0f;
+                finite = true;
+                for (int block = 0; block < 190; ++block)         // about 2 s
+                {
+                    buffer.clear();
+                    if (block == 0)
+                    {
+                        buffer.setSample (0, 100, 0.5f);
+                        buffer.setSample (1, 100, 0.5f);
+                    }
+                    q.processBlock (buffer, midi);
+                    for (int i = 0; i < 512; ++i)
+                    {
+                        const float a = buffer.getSample (0, i), b = buffer.getSample (1, i);
+                        finite = finite && std::isfinite (a) && std::isfinite (b);
+                        if (block * 512 + i > from)
+                        {
+                            energy += (double) a * a;
+                            peakL = std::max (peakL, std::abs (a));
+                            peakR = std::max (peakR, std::abs (b));
+                        }
+                    }
+                }
+                peakLeftRight = std::min (peakL, peakR);
+                return energy;
+            };
+            double sidePeak = 0.0;
+            bool finite = true;
+            const double none = tailEnergy (0.0f, mph::kDefaultColor, sidePeak, finite);
+            expect (none < 1.0e-12, "Halo fully left, Repeats fully left, Mix fully right: one echo and then silence");
+            const double tight = tailEnergy (0.5f, mph::kDefaultColor, sidePeak, finite);
+            expect (tight > 1.0e-4 && sidePeak > 1.0e-3 && finite, "Halo in the middle with Repeats fully left and Mix fully right (Filter-Verb): a tail on both sides");
+            const double tightLate = tailEnergy (0.5f, mph::kDefaultColor, sidePeak, finite, 24000);
+            const double wideLate = tailEnergy (1.0f, mph::kDefaultColor, sidePeak, finite, 24000);
+            expect (wideLate > 10.0 * tightLate && finite, "Halo fully right is still ringing after half a second, much more than Halo in the middle");
+            const double dark = tailEnergy (0.8f, 0.0f, sidePeak, finite);
+            const double thin = tailEnergy (0.8f, 1.0f, sidePeak, finite);
+            expect (dark > 1.0e-4 && thin > 1.0e-5 && finite, "Halo works with the darkest and the thinnest Color");
+        }
+
         // ---- Tempo Sync (milestone 8): the echo heard is the time the window shows ----
         {
             // Default Zone 4, Rate 1/1, 120 BPM assumed (no playhead here): 500 ms
@@ -985,6 +1060,23 @@ int main (int argc, char** argv)
         processSeconds (swapProc, 0.3, 480);
         letWindowThreadRun (150);
         save (swapEditor, outDir.getChildFile ("styled_panel_swap.png"), 1.0f);
+    }
+
+    // ---------------- a picture with Halo in the middle-to-wide range, Repeats up (its own plugin object) ----------------
+    {
+        MimicPhonProcessor haloProc;
+        haloProc.setPlayConfigDetails (2, 2, 48000.0, 512);
+        haloProc.prepareToPlay (48000.0, 512);
+        resetAll (haloProc);
+        MimicPhonEditor haloEditor (haloProc);
+        haloEditor.showView (MimicPhonEditor::View::styled);
+        haloEditor.setSize (1200, 800);
+        setParameter (haloProc, MphParams::halo, 0.62f);
+        setParameter (haloProc, MphParams::repeats, 0.5f);
+        setParameter (haloProc, MphParams::color, 0.6f);
+        processSeconds (haloProc, 0.3, 480);
+        letWindowThreadRun (150);
+        save (haloEditor, outDir.getChildFile ("styled_panel_halo.png"), 1.0f);
     }
 
     // ---------------- the pictures ----------------

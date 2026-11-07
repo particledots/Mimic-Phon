@@ -3,13 +3,15 @@
 // milestone 5 adds Color: the knob's law, unity bit for bit, dark and thin, each echo shaped once more, stability, no clicks;
 // milestone 6 adds Skew, Ping Pong and Swap: the rules, the echo times heard on each side, the routing, stability, no clicks;
 // milestone 7 adds uRate and its LFO: the rules, the steady offset in every Zone, the LFO's swing and speed, the sync lock, stereo opposite, stability;
-// milestone 8 adds Tempo Sync of Rate: the clock, the 13 steps heard, Zones, Clock Division, tempo, Skew sides, jumps instead of glides, stability).
+// milestone 8 adds Tempo Sync of Rate: the clock, the 13 steps heard, Zones, Clock Division, tempo, Skew sides, jumps instead of glides, stability;
+// milestone 9 adds Halo: the rules, off bit for bit, the halo with Repeats fully left (Filter-Verb), size and tail, width, Color's timbre, no run-away).
 // Prints "engine tests: N checks, F failed" and exits with 0 only if nothing failed.
 
 #include <mph/Engine.h>
 #include <mph/Params.h>
 #include <mph/core/Color.h>
 #include <mph/core/Gain.h>
+#include <mph/core/Halo.h>
 #include <mph/core/HostClock.h>
 #include <mph/core/Skew.h>
 #include <mph/core/URate.h>
@@ -2322,6 +2324,404 @@ namespace
         expect (finite && bounded, "Tempo Sync: 40 random runs (steps changing every block, Zones, Skew, Ping Pong, tempo, mono too, infinite repeats) stay finite and bounded");
     }
 
+
+    // ======================= milestone 9: Halo =======================
+
+    // Runs the engine over a whole signal with fixed settings (48 kHz, 512-sample blocks); returns what it made (left, and right for stereo).
+    struct HaloRun { std::vector<float> l, r; double tail = 0.0; };
+    HaloRun runHalo (const mph::Params& p, std::vector<float> inL, std::vector<float> inR, int channels = 2)
+    {
+        mph::Engine e;
+        e.prepare (48000.0, 512, channels);
+        e.setParams (p);
+        HaloRun out;
+        out.l = std::move (inL);
+        out.r = inR.empty() ? out.l : std::move (inR);
+        const int total = (int) out.l.size();
+        for (int done = 0; done < total; done += 512)
+        {
+            const int n = std::min (512, total - done);
+            e.setParams (p);
+            float* chans[2] = { out.l.data() + done, out.r.data() + done };
+            e.process (chans, channels, n);
+        }
+        out.tail = e.getTailSeconds();
+        return out;
+    }
+
+    std::vector<float> impulse (int length, int at, float amount)
+    {
+        std::vector<float> v ((size_t) length, 0.0f);
+        v[(size_t) at] = amount;
+        return v;
+    }
+
+    double energy (const std::vector<float>& v, int from, int to)
+    {
+        double e = 0.0;
+        for (int i = from; i < to && i < (int) v.size(); ++i)
+            e += (double) v[(size_t) i] * v[(size_t) i];
+        return e;
+    }
+
+    double peakAbs (const std::vector<float>& v, int from, int to)
+    {
+        double m = 0.0;
+        for (int i = from; i < to && i < (int) v.size(); ++i)
+            m = std::max (m, (double) std::fabs (v[(size_t) i]));
+        return m;
+    }
+
+    void testHaloRules()
+    {
+        using namespace mph::core;
+        expect (haloShape (0.0f).level == 0.0f && haloShape (kHaloDeadZone).level == 0.0f, "Halo fully left (and within the dead zone) gives no halo");
+        expect (haloShape (0.01f).level > 0.0f, "Halo just above the dead zone gives some halo");
+
+        bool levelRises = true, sizeRises = true, feedbackBelowOne = true, crossRises = true, tailRises = true;
+        HaloShape last = haloShape (0.02f);
+        double lastTail = haloTailSeconds (0.02f);
+        for (int i = 3; i <= 100; ++i)
+        {
+            const float k = (float) i / 100.0f;
+            const HaloShape s = haloShape (k);
+            levelRises = levelRises && s.level >= last.level - 1.0e-6f;
+            sizeRises = sizeRises && s.tankSeconds > last.tankSeconds && s.diffScale > last.diffScale;
+            crossRises = crossRises && s.crossRadians > last.crossRadians;
+            feedbackBelowOne = feedbackBelowOne && s.feedback < 0.9f && s.feedback >= kHaloFeedbackMin - 1.0e-6f;
+            const double tail = haloTailSeconds (k);
+            tailRises = tailRises && tail >= lastTail && tail <= kHaloTailCapSeconds;
+            last = s;
+            lastTail = tail;
+        }
+        expect (levelRises, "Halo level rises with the knob");
+        expect (sizeRises, "Halo's size (tank and allpass times) grows with the knob");
+        expect (crossRises, "the stereo rotation grows with the knob (wider)");
+        expect (feedbackBelowOne, "the tank's loop gain stays below 0.9 over the whole knob, so it cannot run away");
+        expect (tailRises, "Halo's tail grows with the knob and stays under its cap");
+        expect (haloShape (1.0f).level > 0.999f, "Halo fully right is the full level");
+        expect (haloShape (0.5f).tankSeconds < 0.025f && haloShape (1.0f).tankSeconds > 0.055f, "middle = a short tank (tight), fully right = a long one (hall)");
+        expect (haloShape (0.5f).inject == 0.0f && haloShape (0.55f).inject == 0.0f && haloShape (0.8f).inject > 0.0f && haloShape (1.0f).inject > haloShape (0.8f).inject,
+                "the halo is injected into the feedback only at high settings");
+        expect (haloTailSeconds (0.0f) == 0.0 && haloTailSeconds (1.0f) > 1.5, "no tail with Halo off, a few seconds fully right");
+
+        expect (haloMix (0.7f, 123.0f, 0.0f) == 0.7f, "haloMix with no level is the repeat, exactly");
+        expect (std::fabs (haloMix (0.8f, 0.3f, 1.0f) - (0.4f + 0.3f)) < 1.0e-6f, "haloMix at full level = half the repeat plus the halo");
+
+        const HaloTimbre unity = haloTimbre (colorShape (kColorUnity));
+        const HaloTimbre dark = haloTimbre (colorShape (0.0f));
+        const HaloTimbre thin = haloTimbre (colorShape (1.0f));
+        expect (std::fabs (unity.dampHz - kHaloDampHz) < 1.0e-6 && unity.highpassHz == 0.0, "Color at unity leaves Halo's timbre at its default");
+        expect (dark.dampHz < 1000.0 && dark.highpassHz == 0.0, "a dark Color closes Halo's damping");
+        expect (thin.highpassHz > 500.0 && std::fabs (thin.dampHz - kHaloDampHz) < 1.0e-6, "a thin Color high-passes what Halo hears");
+
+        expect (std::strcmp (haloWord (0.0f), "off") == 0 && std::strcmp (haloWord (0.1f), "glint") == 0 && std::strcmp (haloWord (0.3f), "string") == 0
+                    && std::strcmp (haloWord (0.5f), "tight verb") == 0 && std::strcmp (haloWord (0.7f), "room") == 0 && std::strcmp (haloWord (1.0f), "wide hall") == 0,
+                "the window's words for Halo");
+    }
+
+    void testHaloSound()
+    {
+        const int total = 48000 * 3;
+
+        // Off, and within the dead zone: bit for bit as without Halo
+        {
+            std::mt19937 rng (4242);
+            std::uniform_real_distribution<float> noise (-0.5f, 0.5f);
+            std::vector<float> a ((size_t) 48000), b ((size_t) 48000);
+            for (size_t i = 0; i < a.size(); ++i) { a[i] = noise (rng); b[i] = noise (rng); }
+            mph::Params p;
+            p.repeats = 0.6f;
+            p.mix = 0.6f;
+            p.zone = 2;
+            p.halo = 0.0f;
+            const auto off = runHalo (p, a, b);
+            p.halo = 0.003f;
+            const auto near = runHalo (p, a, b);
+            expect (identical (off.l, near.l) && identical (off.r, near.r), "Halo within its dead zone changes nothing, bit for bit");
+            p.halo = 0.3f;
+            const auto on = runHalo (p, a, b);
+            expect (! identical (off.l, on.l), "Halo on changes the sound");
+        }
+
+        // Filter-Verb: Repeats fully left, Mix fully right. One echo, and with Halo its halo.
+        {
+            mph::Params p = repeatsOnly (0, 0.0f, 0.0f);
+            p.halo = 0.0f;
+            const auto plain = runHalo (p, impulse (total, 100, 0.5f), {});
+            expect (energy (plain.l, 600, total) == 0.0, "no Halo, Repeats fully left: one echo and then silence");
+            p.halo = 0.5f;
+            const auto verb = runHalo (p, impulse (total, 100, 0.5f), {});
+            expect (energy (verb.l, 600, total) > 1.0e-4, "Halo acts with Repeats fully left and Mix fully right (Filter-Verb)");
+            expect (energy (verb.l, 600, total) > 1000.0 * energy (plain.l, 600, total) + 1.0e-6, "the Filter-Verb halo is a clear tail, not noise");
+        }
+
+        // Size and tail: more Halo rings longer
+        {
+            mph::Params p = repeatsOnly (0, 0.0f, 0.0f);
+            double tails[4];
+            const float knobs[4] = { 0.15f, 0.4f, 0.7f, 1.0f };
+            for (int i = 0; i < 4; ++i)
+            {
+                p.halo = knobs[i];
+                const auto r = runHalo (p, impulse (total, 100, 0.5f), {});
+                tails[i] = energy (r.l, 12000, 60000) / std::max (1.0e-12, energy (r.l, 0, 12000));
+            }
+            expect (tails[0] < tails[1] && tails[1] < tails[2] && tails[2] < tails[3], "the later part of the halo grows with the knob (longer tail)");
+        }
+
+        // It does not run away: fully right, one echo, the tail dies
+        {
+            mph::Params p = repeatsOnly (0, 0.0f, 0.0f);
+            p.halo = 1.0f;
+            const auto r = runHalo (p, impulse (48000 * 8, 100, 0.5f), {});
+            const double early = peakAbs (r.l, 0, 24000);
+            const double late = peakAbs (r.l, 48000 * 7, 48000 * 8);
+            expect (early > 0.05, "Halo fully right: a clear start");
+            expect (late < 1.0e-3 * early, "Halo fully right dies away (under -60 dB after 7 s): it does not run away");
+        }
+
+        // Width: the same mono signal in both channels comes out different on the two sides
+        {
+            mph::Params p = repeatsOnly (0, 0.0f, 0.0f);
+            p.halo = 1.0f;
+            const auto r = runHalo (p, impulse (total, 100, 0.5f), {});
+            double ll = 0.0, rr = 0.0, lr = 0.0;
+            for (int i = 4000; i < 100000; ++i)
+            {
+                ll += (double) r.l[(size_t) i] * r.l[(size_t) i];
+                rr += (double) r.r[(size_t) i] * r.r[(size_t) i];
+                lr += (double) r.l[(size_t) i] * r.r[(size_t) i];
+            }
+            const double correlation = lr / std::sqrt (std::max (1.0e-30, ll * rr));
+            expect (ll > 1.0e-4 && rr > 1.0e-4, "both sides carry the halo");
+            expect (std::fabs (correlation) < 0.5, "Halo fully right: a wide stereo image (the two sides are not alike)");
+            p.halo = 0.0f;
+            const auto off = runHalo (p, impulse (total, 100, 0.5f), {});
+            expect (identical (off.l, off.r), "without Halo a mono signal stays the same on both sides");
+        }
+
+        // Color sets Halo's timbre: dark = dull, thin = bright
+        {
+            std::mt19937 rng (777);
+            std::uniform_real_distribution<float> noise (-0.5f, 0.5f);
+            std::vector<float> burst ((size_t) 48000, 0.0f);
+            for (int i = 0; i < 2000; ++i)
+                burst[(size_t) (100 + i)] = noise (rng);
+            auto brightness = [&] (float color)
+            {
+                mph::Params p = repeatsOnly (0, 0.0f, 0.0f);
+                p.halo = 0.8f;
+                p.color = color;
+                const auto r = runHalo (p, burst, {});
+                double d = 0.0, e = 1.0e-30;
+                for (int i = 6000; i < 40000; ++i)
+                {
+                    const double dv = (double) r.l[(size_t) i] - (double) r.l[(size_t) i - 1];
+                    d += dv * dv;
+                    e += (double) r.l[(size_t) i] * r.l[(size_t) i];
+                }
+                return d / e;
+            };
+            const double dark = brightness (0.05f), unity = brightness (0.8f), thin = brightness (1.0f);
+            expect (dark < 0.5 * unity, "a dark Color makes a dark halo");
+            expect (thin > 1.5 * unity, "a thin Color makes a thin, bright halo");
+        }
+
+        // Repeats fully left: no loop through the delay buffer (the halo is not fed back); with Repeats up, the repeats come round again
+        {
+            mph::Params p = repeatsOnly (2, 0.0f, 0.0f);
+            p.halo = 0.2f;
+            const int delaySamples = (int) std::lround (mph::kZones[2].minSeconds * 48000.0);
+            const auto one = runHalo (p, impulse (total, 100, 0.5f), {});
+            const double first = peakAbs (one.l, 0, 2 * delaySamples - 500);
+            const double second = peakAbs (one.l, 2 * delaySamples + 2500, 2 * delaySamples + 20000);
+            expect (first > 0.1 && second < 0.001, "Repeats fully left with Halo: one echo and its halo, no second echo");
+            p.repeats = 0.55f;
+            const auto more = runHalo (p, impulse (total, 100, 0.5f), {});
+            expect (peakAbs (more.l, 2 * delaySamples - 50, 2 * delaySamples + 400) > 0.02, "Repeats up with Halo: the second echo comes");
+        }
+
+        // Mono works
+        {
+            mph::Params p = repeatsOnly (0, 0.0f, 0.0f);
+            p.halo = 0.7f;
+            const auto r = runHalo (p, impulse (total, 100, 0.5f), {}, 1);
+            bool finite = true;
+            for (float v : r.l)
+                finite = finite && std::isfinite (v);
+            expect (finite && energy (r.l, 600, total) > 1.0e-4, "Halo works on a mono track");
+        }
+
+        // Clear empties the halo too
+        {
+            mph::Engine e;
+            e.prepare (48000.0, 512, 2);
+            mph::Params p = repeatsOnly (0, 0.0f, 0.0f);
+            p.halo = 1.0f;
+            std::vector<float> l = impulse (4096, 10, 0.5f), r = l;
+            e.setParams (p);
+            float* chans[2] = { l.data(), r.data() };
+            e.process (chans, 2, 512);
+            p.clear = true;
+            e.setParams (p);
+            std::vector<float> zl (512, 0.0f), zr (512, 0.0f);
+            float* clearChans[2] = { zl.data(), zr.data() };
+            e.process (clearChans, 2, 512);
+            p.clear = false;
+            std::vector<float> sl (4096, 0.0f), sr (4096, 0.0f);
+            e.setParams (p);
+            for (int done = 0; done < 4096; done += 512)
+            {
+                float* c2[2] = { sl.data() + done, sr.data() + done };
+                e.process (c2, 2, 512);
+            }
+            expect (peakAbs (sl, 0, 4096) < 1.0e-9 && peakAbs (sr, 0, 4096) < 1.0e-9, "Clear empties the halo's ringing too");
+        }
+
+        // Turned off again: the halo goes, with nothing left over
+        {
+            mph::Engine e;
+            e.prepare (48000.0, 512, 2);
+            mph::Params p = repeatsOnly (0, 0.0f, 0.0f);
+            std::mt19937 rng (99);
+            std::uniform_real_distribution<float> noise (-0.5f, 0.5f);
+            p.halo = 0.8f;
+            for (int b = 0; b < 30; ++b)
+            {
+                std::vector<float> l (512), r (512);
+                for (int i = 0; i < 512; ++i) { l[(size_t) i] = noise (rng); r[(size_t) i] = noise (rng); }
+                float* chans[2] = { l.data(), r.data() };
+                e.setParams (p);
+                e.process (chans, 2, 512);
+            }
+            p.halo = 0.0f;
+            std::vector<float> after;
+            for (int b = 0; b < 120; ++b)
+            {
+                std::vector<float> l (512, 0.0f), r (512, 0.0f);
+                float* chans[2] = { l.data(), r.data() };
+                e.setParams (p);
+                e.process (chans, 2, 512);
+                after.insert (after.end(), l.begin(), l.end());
+            }
+            expect (peakAbs (after, 24000, (int) after.size()) < 1.0e-6, "Halo turned off fades away (in about a third of a second) and leaves no ringing behind");
+        }
+
+        // The host's tail includes the halo
+        {
+            mph::Params p;
+            p.halo = 0.0f;
+            const double without = runHalo (p, std::vector<float> (512, 0.0f), {}).tail;
+            p.halo = 1.0f;
+            const double with = runHalo (p, std::vector<float> (512, 0.0f), {}).tail;
+            expect (with > without + 1.0, "the tail told to the host grows with Halo");
+            p.halo = 0.0f;
+            expect (std::fabs (runHalo (p, std::vector<float> (512, 0.0f), {}).tail - without) < 1.0e-9, "and is unchanged with Halo off");
+        }
+
+        // No click when the knob is swept
+        {
+            mph::Engine e;
+            e.prepare (48000.0, 512, 2);
+            mph::Params p = repeatsOnly (3, 0.4f, 0.3f);
+            const int blocks = 400;
+            std::vector<float> out;
+            for (int b = 0; b < blocks; ++b)
+            {
+                std::vector<float> l (512), r (512);
+                for (int i = 0; i < 512; ++i)
+                {
+                    const float v = 0.3f * (float) std::sin (2.0 * 3.14159265358979 * 220.0 * (double) (b * 512 + i) / 48000.0);
+                    l[(size_t) i] = r[(size_t) i] = v;
+                }
+                p.halo = std::min (1.0f, (float) b / 300.0f);
+                float* chans[2] = { l.data(), r.data() };
+                e.setParams (p);
+                e.process (chans, 2, 512);
+                out.insert (out.end(), l.begin(), l.end());
+            }
+            double worst = 0.0;
+            for (size_t i = 1; i < out.size(); ++i)
+                worst = std::max (worst, (double) std::fabs (out[i] - out[i - 1]));
+            expect (worst < 0.35, "sweeping Halo from 0 to 1 makes no click");
+        }
+    }
+
+    void testHaloStability()
+    {
+        std::mt19937 rng (31337);
+        std::uniform_real_distribution<float> noise (-1.0f, 1.0f);
+        std::uniform_real_distribution<float> unit (0.0f, 1.0f);
+        bool finite = true, bounded = true;
+        for (int run = 0; run < 40; ++run)
+        {
+            const int channels = (run % 5 == 4) ? 1 : 2;
+            mph::Engine e;
+            e.prepare (48000.0, 512, channels);
+            std::vector<float> l (512), r (512);
+            for (int block = 0; block < 60; ++block)
+            {
+                mph::Params p;
+                p.halo = (run % 3 == 0) ? 1.0f : unit (rng);
+                p.repeats = (run % 2 == 0) ? 1.0f : unit (rng);
+                p.color = unit (rng);
+                p.mix = unit (rng);
+                p.zone = (int) (rng() % 8);
+                p.rate = unit (rng);
+                p.skew = rng() & 1;
+                p.pingPong = rng() & 1;
+                p.tempoSync = rng() & 1;
+                p.uRate = unit (rng);
+                p.uRateLfoDepth = unit (rng);
+                p.inputGainStep = 3;
+                p.inputLevel = 1.0f;
+                p.clear = (rng() % 40) == 0;
+                e.setParams (p);
+                for (size_t i = 0; i < l.size(); ++i) { l[i] = noise (rng); r[i] = noise (rng); }
+                float* chans[2] = { l.data(), r.data() };
+                e.process (chans, channels, 512);
+                for (size_t i = 0; i < l.size(); ++i)
+                {
+                    finite = finite && std::isfinite (l[i]) && std::isfinite (r[i]);
+                    bounded = bounded && std::fabs (l[i]) < 8.0f && std::fabs (r[i]) < 8.0f;
+                }
+            }
+        }
+        expect (finite && bounded, "Halo: 40 random runs (Halo up to fully right, infinite repeats, Zones, Skew, Ping Pong, Clear, mono too) stay finite and bounded");
+
+        // Everything at its worst for a long time: loud noise, Halo fully right, Repeats beyond infinite, short Zone, Color thin, then dark
+        for (int colorCase = 0; colorCase < 2; ++colorCase)
+        {
+            mph::Engine e;
+            e.prepare (48000.0, 512, 2);
+            mph::Params p;
+            p.halo = 1.0f;
+            p.repeats = 1.0f;
+            p.zone = 1;
+            p.rate = 0.3f;
+            p.mix = 0.7f;
+            p.color = colorCase == 0 ? 1.0f : 0.0f;
+            p.inputGainStep = 3;
+            p.inputLevel = 1.0f;
+            double worst = 0.0;
+            bool ok = true;
+            std::vector<float> l (512), r (512);
+            for (int block = 0; block < 48000 * 20 / 512; ++block)
+            {
+                for (size_t i = 0; i < l.size(); ++i) { l[i] = noise (rng); r[i] = noise (rng); }
+                float* chans[2] = { l.data(), r.data() };
+                e.setParams (p);
+                e.process (chans, 2, 512);
+                for (size_t i = 0; i < l.size(); ++i)
+                {
+                    ok = ok && std::isfinite (l[i]) && std::isfinite (r[i]);
+                    worst = std::max (worst, (double) std::max (std::fabs (l[i]), std::fabs (r[i])));
+                }
+            }
+            expect (ok && worst < 4.0, colorCase == 0 ? "Halo fully right with beyond-infinite Repeats for 20 s, thin Color: bounded" : "the same with dark Color: bounded");
+        }
+    }
 }
 
 int main()
@@ -2352,6 +2752,9 @@ int main()
     testTempoSyncRules();
     testTempoSyncSound();
     testTempoSyncStability();
+    testHaloRules();
+    testHaloSound();
+    testHaloStability();
 
     std::printf ("engine tests: %d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;

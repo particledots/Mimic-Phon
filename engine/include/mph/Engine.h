@@ -1,11 +1,11 @@
 // The Mimic-Phon engine. Plain C++17, no JUCE, no plugin code.
 //
-// Milestone 8: the core repeater (milestone 4), Color (5), Skew, Ping Pong and Swap (6), uRate with its LFO (7), and Tempo Sync of Rate.
+// Milestone 9: the core repeater (milestone 4), Color (5), Skew, Ping Pong and Swap (6), uRate with its LFO (7), Tempo Sync of Rate (8), and Halo.
 // What works now, and what does not:
 //
 //   Works:   Input Level and the Input Gain step, Zone, Rate, Repeats, Mix, Output Level, Clear, Color, Skew, Ping Pong / Swap,
-//            uRate and the uRate LFO (Rate, Depth, Sine / Triangle, Sync to Logic's tempo), Tempo Sync of Rate.
-//   Not yet: Halo (9), Flip (10), Hold (11).
+//            uRate and the uRate LFO (Rate, Depth, Sine / Triangle, Sync to Logic's tempo), Tempo Sync of Rate, Halo.
+//   Not yet: Flip (10), Hold (11).
 //            Those controls are read but do nothing.
 //
 // How it sounds, in short: the input is written into one shared stereo buffer (core/DelayBuffer.h, 41.8 s or more) that serves
@@ -39,6 +39,11 @@
 //     new Zone, a new Clock Division, the button itself, and the best-fitting Zone changing with the tempo. With Skew the two sides pick their
 //     own steps (two multiples at once). A tempo that merely drifts is followed by the normal Rate glide. uRate and its LFO still bend the pitch.
 //
+//   * Halo (core/Halo.h): stereo diffusion of the repeat that is heard. Fully left: nothing (bit for bit). Middle: a tight, string-like
+//     reverb. Fully right: a big, wide reverb. It acts on the repeat itself, so it works with Repeats fully left (one echo and its halo,
+//     the "Filter-Verb" patch). At high settings the halo is also injected into the feedback path (scaled by Repeats). Color sets its
+//     timbre. The tank's loop gain stays below 0.9, so it cannot run away by itself; the leveller still guards the repeat loop.
+//
 // Window-only things from milestone 3 (never affect the sound): Logic's tempo as last heard, and two counters for the blinking
 // lights: one goes up at every tick of the tempo clock (TICK), the other every time the current delay time has passed (RATE).
 
@@ -50,6 +55,7 @@
 #include "Params.h"
 #include "core/Color.h"
 #include "core/DelayBuffer.h"
+#include "core/Halo.h"
 #include "core/HostClock.h"
 #include "core/Repeats.h"
 #include "core/Skew.h"
@@ -189,6 +195,9 @@ namespace mph
         double lfoStep = 0.0;                              // phase added per sample
         double lfoSmoothed = 0.0;                          // the LFO's output, smoothed by about 2 ms (a jump of phase makes no click)
         double lfoSmoothCoefficient = 0.01;
+
+        // Halo (milestone 9)
+        core::Halo halo;
 
         // Color (milestone 5): the knob glides (about 30 ms) and the filter's coefficients follow every 16 samples
         core::ColorFilter colorFilter;
