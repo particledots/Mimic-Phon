@@ -2,7 +2,8 @@
 // milestone 4 adds the repeater: dry path, levels, Mix, echoes in every Zone, Repeats, saturation, Zone jumps, Rate glide, Clear, tail;
 // milestone 5 adds Color: the knob's law, unity bit for bit, dark and thin, each echo shaped once more, stability, no clicks;
 // milestone 6 adds Skew, Ping Pong and Swap: the rules, the echo times heard on each side, the routing, stability, no clicks;
-// milestone 7 adds uRate and its LFO: the rules, the steady offset in every Zone, the LFO's swing and speed, the sync lock, stereo opposite, stability).
+// milestone 7 adds uRate and its LFO: the rules, the steady offset in every Zone, the LFO's swing and speed, the sync lock, stereo opposite, stability;
+// milestone 8 adds Tempo Sync of Rate: the clock, the 13 steps heard, Zones, Clock Division, tempo, Skew sides, jumps instead of glides, stability).
 // Prints "engine tests: N checks, F failed" and exits with 0 only if nothing failed.
 
 #include <mph/Engine.h>
@@ -18,6 +19,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <random>
 #include <vector>
 
@@ -937,8 +939,7 @@ namespace
         runSeconds (e, 1.0, sr, 8192);
         expect (e.getRateTickCount() >= 700 && e.getRateTickCount() <= 800, "Zone 0 at the shortest time counts about 770 times a second");
 
-        // Tempo Sync is built in milestone 8: until then the button changes nothing, so the light still follows the free-running time
-        expect (! mph::kTempoSyncAudible, "Tempo Sync is not audible yet (milestone 8)");
+        // Tempo Sync (milestone 8): the light follows the clocked time (500 ms at 120 BPM, Zone 4, 1/1) instead of the free-running 653 ms
         e.prepare (sr, 512, 2);
         e.setHost (host);
         p = {};
@@ -947,7 +948,7 @@ namespace
         p.tempoSync = true;
         e.setParams (p);
         runSeconds (e, 10.0, sr, 512);
-        expect (e.getRateTickCount() >= 14 && e.getRateTickCount() <= 16, "with Tempo Sync on (not working yet) the rate light still counts the free-running time");
+        expect (e.getRateTickCount() >= 19 && e.getRateTickCount() <= 21, "with Tempo Sync on the rate light counts the clocked time (about 20 in 10 s)");
 
         // Preparing again starts the counters from 0
         e.prepare (sr, 512, 2);
@@ -2022,6 +2023,305 @@ namespace
         }
     }
 
+    // ---- milestone 8: Tempo Sync of Rate ----
+
+    // Like delayTrace, but the settings and the host can change from block to block (change gets the block number, 512 samples each).
+    Trace delayTraceChanging (int samples, const std::function<void (int, mph::Params&, mph::core::HostInfo&)>& change)
+    {
+        mph::Engine e;
+        e.prepare (48000.0, 512, 2);
+        std::vector<float> l ((size_t) samples), r ((size_t) samples);
+        for (int i = 0; i < samples; ++i)
+            l[(size_t) i] = r[(size_t) i] = (float) (i * kRampStep);
+        std::vector<float> outL = l, outR = r;
+        mph::Params p;
+        mph::core::HostInfo host;
+        host.tempoValid = true;
+        host.bpm = 120.0;
+        for (int done = 0; done < samples; done += 512)
+        {
+            change (done / 512, p, host);
+            e.setParams (p);
+            e.setHost (host);
+            float* chans[2] = { outL.data() + done, outR.data() + done };
+            e.process (chans, 2, std::min (512, samples - done));
+        }
+        Trace t;
+        for (int i = 0; i < samples; ++i)
+        {
+            t.l.push_back (i - outL[(size_t) i] / kRampStep);
+            t.r.push_back (i - outR[(size_t) i] / kRampStep);
+        }
+        return t;
+    }
+
+    void testTempoSyncRules()
+    {
+        using namespace mph::core;
+        expect (mph::kTempoSyncAudible, "Tempo Sync is audible (milestone 8)");
+        expect (std::fabs (clockPeriodSeconds (3, 4.0, 120.0) - 0.5) < 1e-12, "clock: a quarter note at 120 BPM is 500 ms");
+        expect (std::fabs (clockPeriodSeconds (7, 4.0, 120.0) - 0.125) < 1e-12, "clock: a 16th at 120 BPM is 125 ms");
+        expect (std::fabs (clockPeriodSeconds (1, 4.0, 120.0) - 2.0) < 1e-12 && std::fabs (clockPeriodSeconds (1, 3.0, 120.0) - 1.5) < 1e-12,
+                "clock: a bar follows the host's bar length");
+        expect (std::fabs (clockPeriodSeconds (3, 4.0, 0.0) - 0.5) < 1e-12 && std::fabs (clockPeriodSeconds (3, 4.0, -5.0) - 0.5) < 1e-12
+                    && std::fabs (clockPeriodSeconds (3, 4.0, std::nan ("")) - 0.5) < 1e-12, "clock: no tempo from Logic counts as 120 BPM");
+        expect (std::fabs (clockPeriodSeconds (3, 4.0, 5.0) - 6.0) < 1e-12 && std::fabs (clockPeriodSeconds (3, 4.0, 5000.0) - 60.0 / 999.0) < 1e-12,
+                "clock: a tempo is kept between 10 and 999 BPM");
+        expect (bestZoneForPeriod (clockPeriodSeconds (7, 4.0, 120.0)) == 2, "a 16th at 120 BPM fits Zone 2 (yellow), as on the module at 120 BPM");
+        expect (bestZoneForPeriod (clockPeriodSeconds (3, 4.0, 120.0)) == 4, "a quarter at 120 BPM fits Zone 4");
+        // the 13 steps, left to right: x2 ... 1/1 ... /2, each one slower than the one before
+        bool slower = true;
+        for (int i = 1; i < kNumSyncSteps; ++i)
+            slower = slower && syncDelaySeconds (4, ((float) i + 0.5f) / 13.0f, 0.5) > syncDelaySeconds (4, ((float) i - 0.5f) / 13.0f, 0.5);
+        expect (slower, "Tempo Sync: turning Rate clockwise never makes the time shorter, one step at a time");
+        expect (std::strcmp (kSyncNames[0], "x2") == 0 && std::strcmp (kSyncNames[6], "1/1") == 0 && std::strcmp (kSyncNames[12], "/2") == 0, "the steps are named as in the manual");
+    }
+
+    void testTempoSyncSound()
+    {
+        const double sr = 48000.0;
+        auto syncOnly = [] (int zone, float rate)
+        {
+            mph::Params p = repeatsOnly (zone, rate, 0.0f);
+            p.tempoSync = true;
+            return p;
+        };
+
+        // The delay heard is the clock's: 1/1 in the middle of Rate is exactly one clock period (500 ms at 120 BPM, a quarter note, Zone 4)
+        {
+            const auto t = delayTrace (syncOnly (4, 0.5f), 150000);
+            expect (std::fabs (meanOf (t.l) - 0.5 * sr) < 0.5 && highest (t.l) - lowest (t.l) < 0.15, "Tempo Sync: 1/1 in Zone 4 at 120 BPM is 500 ms (left)");
+            expect (std::fabs (meanOf (t.r) - 0.5 * sr) < 0.5, "Tempo Sync: 1/1 in Zone 4 at 120 BPM is 500 ms (right)");
+        }
+        // All 13 steps, heard
+        {
+            bool all = true;
+            for (int i = 0; i < mph::core::kNumSyncSteps; ++i)
+            {
+                const auto t = delayTrace (syncOnly (4, ((float) i + 0.5f) / 13.0f), 150000);
+                const double want = 0.5 / mph::core::kSyncFactors[i] * sr;
+                all = all && std::fabs (meanOf (t.l) - want) < 0.5 && std::fabs (meanOf (t.r) - want) < 0.5 && highest (t.l) - lowest (t.l) < 0.15;
+            }
+            expect (all, "Tempo Sync: all 13 steps give the clock period divided by the step's factor, on both sides");
+        }
+        // The Zone doubles or halves the time per Zone
+        {
+            struct Case { int zone; double seconds; };
+            const Case cases[] = { { 5, 1.0 }, { 3, 0.25 }, { 2, 0.125 }, { 1, 0.0625 } };
+            for (const auto& c : cases)
+            {
+                const auto t = delayTrace (syncOnly (c.zone, 0.5f), 150000);
+                expect (std::fabs (meanOf (t.l) - c.seconds * sr) < 0.5, "Tempo Sync: each Zone away from the best one doubles or halves the time");
+            }
+        }
+        // The Clock Division and Logic's tempo are the clock
+        {
+            mph::Params p = syncOnly (3, 0.5f);
+            p.clockDivision = 5;                                     // 1/8: 250 ms at 120 BPM, which fits Zone 3
+            expect (std::fabs (meanOf (delayTrace (p, 150000).l) - 0.25 * sr) < 0.5, "Tempo Sync: Clock Division 1/8 at 120 BPM, Zone 3: 250 ms");
+            p = syncOnly (4, 0.5f);
+            p.clockDivision = 4;                                     // 1/4T: 333 ms, which fits Zone 3, so Zone 4 doubles it
+            expect (std::fabs (meanOf (delayTrace (p, 150000).l) - (2.0 / 3.0) * sr) < 0.5, "Tempo Sync: Clock Division 1/4T, Zone 4: 667 ms");
+            expect (std::fabs (meanOf (delayTrace (syncOnly (4, 0.5f), 150000, false, 0.0, 90.0).l) - (2.0 / 3.0) * sr) < 0.5, "Tempo Sync: 90 BPM quarter notes, Zone 4: 667 ms");
+            mph::Engine e;
+            e.prepare (sr, 512, 2);
+            e.setParams (syncOnly (4, 0.5f));
+            expect (std::fabs (e.getDelaySeconds() - 0.5) < 1e-6, "Tempo Sync with no tempo from Logic: counted as 120 BPM, 500 ms");
+        }
+        // Tempo Sync off: the clock means nothing
+        {
+            mph::Params p = repeatsOnly (4, 0.5f, 0.0f);
+            const auto a = delayTrace (p, 100000);
+            p.clockDivision = 7;
+            const auto b = delayTrace (p, 100000, false, 0.0, 77.0);
+            expect (std::fabs (meanOf (a.l) - meanOf (b.l)) < 1e-9 && std::fabs (meanOf (a.l) - mph::core::freeDelaySeconds (4, 0.5f) * sr) < 0.5, "Tempo Sync off: Clock Division and tempo change nothing (653 ms)");
+        }
+        // Rate inside one step: nothing moves
+        {
+            const auto t = delayTrace (syncOnly (4, 0.50f), 100000);
+            const auto u = delayTrace (syncOnly (4, 0.53f), 100000);
+            expect (std::fabs (meanOf (t.l) - meanOf (u.l)) < 1e-9, "Tempo Sync: Rate anywhere inside one step gives the same time");
+        }
+
+        // A step is a jump, not a bend: after 30 ms the new time is there (a glide would still be on its way)
+        {
+            auto stepAt = [&] (bool sync)
+            {
+                return delayTraceChanging (96000, [&] (int block, mph::Params& p, mph::core::HostInfo&)
+                {
+                    p = repeatsOnly (4, block < 100 ? 0.5f : 0.05f, 0.0f);      // step 6 (500 ms) to step 0 (250 ms)
+                    p.tempoSync = sync;
+                });
+            };
+            const int at = 100 * 512, later = at + 1600;                        // 33 ms on
+            const auto synced = stepAt (true), free = stepAt (false);
+            expect (std::fabs (synced.l[(size_t) (at - 10)] - 0.5 * sr) < 0.5, "Tempo Sync step: before the step, 500 ms");
+            expect (std::fabs (synced.l[(size_t) later] - 0.25 * sr) < 0.5 && std::fabs (synced.r[(size_t) later] - 0.25 * sr) < 0.5, "Tempo Sync step: 33 ms after it the new time (250 ms) is there");
+            expect (std::fabs (free.l[(size_t) later] - synced.l[(size_t) later]) > 1000.0, "(free-running Rate glides: still on its way after 33 ms)");
+            bool between = true;                                                 // the crossfade moves in one direction only
+            for (int i = at; i < later; ++i)
+                between = between && synced.l[(size_t) i] <= 0.5 * sr + 0.5 && synced.l[(size_t) i] >= 0.25 * sr - 0.5;
+            expect (between, "Tempo Sync step: the time goes straight from old to new (no overshoot)");
+        }
+        // The same for a new Clock Division and for the button itself
+        {
+            auto run = [&] (int what)
+            {
+                return delayTraceChanging (96000, [&] (int block, mph::Params& p, mph::core::HostInfo&)
+                {
+                    p = repeatsOnly (4, 0.5f, 0.0f);
+                    p.tempoSync = true;
+                    if (block >= 100)
+                    {
+                        if (what == 0) p.clockDivision = 4;       // 1/4T: 500 ms to 667 ms
+                        if (what == 1) p.tempoSync = false;       // 500 ms to the free-running 653 ms
+                    }
+                });
+            };
+            const int later = 100 * 512 + 1600;
+            const auto division = run (0), button = run (1);
+            expect (std::fabs (division.l[(size_t) later] - (2.0 / 3.0) * sr) < 0.5, "a new Clock Division jumps to its time within 33 ms");
+            expect (std::fabs (button.l[(size_t) later] - mph::core::freeDelaySeconds (4, 0.5f) * sr) < 0.5, "Tempo Sync switched off jumps to the free-running time within 33 ms");
+        }
+        // The best-fitting Zone moving with the tempo is a jump too (an octave), not a bend
+        {
+            const auto t = delayTraceChanging (96000, [&] (int block, mph::Params& p, mph::core::HostInfo& host)
+            {
+                p = repeatsOnly (4, 0.5f, 0.0f);
+                p.tempoSync = true;
+                host.bpm = block < 100 ? 128.0 : 132.0;               // 469 ms (best Zone 4) to 455 ms (best Zone 3: Zone 4 doubles it)
+            });
+            const int later = 100 * 512 + 1600;
+            const double before = 60.0 / 128.0, after = 2.0 * 60.0 / 132.0;
+            expect (std::fabs (t.l[(size_t) (100 * 512 - 10)] - before * sr) < 0.5, "tempo across the Zone boundary: before, 469 ms");
+            expect (std::fabs (t.l[(size_t) later] - after * sr) < 0.5, "tempo across the Zone boundary: the new time (909 ms) is there within 33 ms (a jump)");
+        }
+        // A tempo that drifts inside one Zone is followed by the normal Rate glide (no jump)
+        {
+            const auto t = delayTraceChanging (96000, [&] (int block, mph::Params& p, mph::core::HostInfo& host)
+            {
+                p = repeatsOnly (4, 0.5f, 0.0f);
+                p.tempoSync = true;
+                host.bpm = block < 100 ? 100.0 : 110.0;                // 600 ms to 545 ms
+            });
+            const int soon = 100 * 512 + 1600;
+            expect (t.l[(size_t) soon] > 0.545 * sr + 300.0 && t.l[(size_t) soon] < 0.6 * sr - 100.0 && t.l[(size_t) 95999] < 0.5457 * sr, "a tempo change inside one Zone glides to the new time (no jump)");
+        }
+
+        // With Skew the two sides pick their own steps: two multiples at once
+        {
+            const auto t = delayTraceChanging (200000, [&] (int block, mph::Params& p, mph::core::HostInfo&)
+            {
+                p = repeatsOnly (4, block < 40 ? 0.5f : 0.8f, 0.0f);
+                p.tempoSync = true;
+                p.skew = true;                                        // Rate 12:00 then 0.8: left 0.2 (x1 2/3), right 0.8 (/1 2/3)
+            });
+            const double left = 0.5 / mph::core::kSyncFactors[2], right = 0.5 / mph::core::kSyncFactors[10];
+            expect (std::fabs (meanOf (std::vector<double> (t.l.end() - 20000, t.l.end())) - left * sr) < 0.5, "Tempo Sync with Skew: the left side is on x1 2/3 (300 ms)");
+            expect (std::fabs (meanOf (std::vector<double> (t.r.end() - 20000, t.r.end())) - right * sr) < 0.5, "Tempo Sync with Skew: the right side is on /1 2/3 (833 ms)");
+        }
+        // Ping Pong: each hop is half the clocked time
+        {
+            mph::Params p = syncOnly (4, 0.5f);
+            p.pingPong = true;
+            const auto t = delayTrace (p, 150000);
+            expect (std::fabs (meanOf (t.l) - 0.25 * sr) < 0.5, "Tempo Sync with Ping Pong: each hop is half the clocked time");
+        }
+        // uRate still bends the pitch while Tempo Sync is on (the manual: doppler stays on the microRate input)
+        {
+            mph::Params p = syncOnly (4, 0.5f);
+            p.uRate = 1.0f;
+            const auto t = delayTrace (p, 150000);
+            expect (std::fabs (meanOf (t.l) - (0.5 - 0.006) * sr) < 0.5, "Tempo Sync with uRate: the steady offset is still added");
+        }
+        // The RATE light follows the clocked time: a blink every 500 ms
+        {
+            mph::Engine e;
+            e.prepare (sr, 512, 2);
+            mph::core::HostInfo host;
+            host.tempoValid = true;
+            host.bpm = 120.0;
+            host.playing = true;
+            host.ppqValid = true;
+            e.setHost (host);
+            mph::Params p = syncOnly (4, 0.5f);
+            e.setParams (p);
+            std::vector<float> l (480000, 0.0f), r (480000, 0.0f);
+            processAll (e, l, &r, 512);
+            expect (e.getRateTickCount() >= 19 && e.getRateTickCount() <= 21, "Tempo Sync: the RATE light blinks every 500 ms (about 20 in 10 s)");
+        }
+        // No click on a step: a steady tone, a step, and the output never changes faster than the tone itself
+        {
+            auto run = [&] (bool step)
+            {
+                mph::Engine e;
+                e.prepare (sr, 512, 2);
+                std::vector<float> l (96000), r (96000);
+                for (size_t i = 0; i < l.size(); ++i)
+                    l[i] = r[i] = 0.5f * (float) std::sin (2.0 * 3.14159265358979 * 220.0 * (double) i / sr);
+                for (int done = 0; done < 96000; done += 512)
+                {
+                    mph::Params p = repeatsOnly (4, (step && done >= 60 * 512) ? 0.05f : 0.5f, 0.0f);
+                    p.tempoSync = true;
+                    e.setParams (p);
+                    float* chans[2] = { l.data() + done, r.data() + done };
+                    e.process (chans, 2, std::min (512, 96000 - done));
+                }
+                double worst = 0.0;
+                for (size_t i = 40000; i + 1 < l.size(); ++i)
+                    worst = std::max (worst, (double) std::fabs (l[i + 1] - l[i]));
+                return worst;
+            };
+            expect (run (true) <= run (false) * 1.05 + 0.002, "Tempo Sync: a step under a playing tone does not click");
+        }
+    }
+
+    void testTempoSyncStability()
+    {
+        std::mt19937 rng (4242);
+        std::uniform_real_distribution<float> unit (0.0f, 1.0f);
+        std::uniform_real_distribution<float> noise (-0.9f, 0.9f);
+        bool finite = true, bounded = true;
+        for (int run = 0; run < 40; ++run)
+        {
+            mph::Engine e;
+            e.prepare (48000.0, 512, (run % 5 == 0) ? 1 : 2);
+            const int channels = (run % 5 == 0) ? 1 : 2;
+            std::vector<float> l (512), r (512);
+            for (int block = 0; block < 250; ++block)
+            {
+                mph::Params p;
+                p.tempoSync = true;
+                p.zone = (int) (rng() % 8);
+                p.rate = unit (rng);                                   // a new step almost every block: the jumps pile up
+                p.repeats = run % 2 ? 1.0f : unit (rng);
+                p.mix = unit (rng);
+                p.skew = rng() & 1;
+                p.pingPong = rng() & 1;
+                p.clockDivision = (int) (rng() % mph::core::kNumClockDivisions);
+                p.uRate = unit (rng);
+                p.uRateLfoDepth = unit (rng);
+                mph::core::HostInfo host;
+                host.tempoValid = (rng() % 4) != 0;
+                host.bpm = 20.0 + 280.0 * unit (rng);
+                host.playing = rng() & 1;
+                host.ppqValid = true;
+                host.ppq = block * 0.1;
+                e.setParams (p);
+                e.setHost (host);
+                for (size_t i = 0; i < l.size(); ++i) { l[i] = noise (rng); r[i] = noise (rng); }
+                float* chans[2] = { l.data(), r.data() };
+                e.process (chans, channels, 512);
+                for (size_t i = 0; i < l.size(); ++i)
+                {
+                    finite = finite && std::isfinite (l[i]) && std::isfinite (r[i]);
+                    bounded = bounded && std::fabs (l[i]) < 8.0f && std::fabs (r[i]) < 8.0f;
+                }
+            }
+        }
+        expect (finite && bounded, "Tempo Sync: 40 random runs (steps changing every block, Zones, Skew, Ping Pong, tempo, mono too, infinite repeats) stay finite and bounded");
+    }
+
 }
 
 int main()
@@ -2049,6 +2349,9 @@ int main()
     testURateRules();
     testURateSound();
     testURateStability();
+    testTempoSyncRules();
+    testTempoSyncSound();
+    testTempoSyncStability();
 
     std::printf ("engine tests: %d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;

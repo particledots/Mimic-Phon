@@ -18,6 +18,7 @@
 #include <cmath>
 
 #include "../Params.h"
+#include "HostClock.h"
 
 namespace mph::core
 {
@@ -50,6 +51,15 @@ namespace mph::core
     {
         const double x = std::min (1.0, std::max (0.0, (double) rate01));
         return std::min (kNumSyncSteps - 1, (int) std::floor (x * kNumSyncSteps));
+    }
+
+    // The clock's period in seconds (the time between two ticks of the Clock Division menu's note value) from the host's tempo and
+    // bar length. No tempo from the host (zero, negative or not a number) counts as 120 BPM; a tempo is kept between 10 and 999.
+    // The engine and the window both call this, so the sound and the read-outs cannot disagree.
+    inline double clockPeriodSeconds (int divisionIndex, double beatsPerBar, double bpm)
+    {
+        const double tempo = std::isfinite (bpm) && bpm > 0.0 ? std::min (999.0, std::max (10.0, bpm)) : 120.0;
+        return beatsPerTick (divisionIndex, beatsPerBar) * 60.0 / tempo;
     }
 
     // The Zone that suits a clock period best: the one whose middle (on a logarithmic scale) is closest to the period.

@@ -1,10 +1,11 @@
 // The Mimic-Phon engine. Plain C++17, no JUCE, no plugin code.
 //
-// Milestone 7: the core repeater (milestone 4), Color (5), Skew, Ping Pong and Swap (6), and uRate with its LFO. What works now, and what does not:
+// Milestone 8: the core repeater (milestone 4), Color (5), Skew, Ping Pong and Swap (6), uRate with its LFO (7), and Tempo Sync of Rate.
+// What works now, and what does not:
 //
 //   Works:   Input Level and the Input Gain step, Zone, Rate, Repeats, Mix, Output Level, Clear, Color, Skew, Ping Pong / Swap,
-//            uRate and the uRate LFO (Rate, Depth, Sine / Triangle, Sync to Logic's tempo).
-//   Not yet: Tempo Sync of Rate (8), Halo (9), Flip (10), Hold (11).
+//            uRate and the uRate LFO (Rate, Depth, Sine / Triangle, Sync to Logic's tempo), Tempo Sync of Rate.
+//   Not yet: Halo (9), Flip (10), Hold (11).
 //            Those controls are read but do nothing.
 //
 // How it sounds, in short: the input is written into one shared stereo buffer (core/DelayBuffer.h, 41.8 s or more) that serves
@@ -31,6 +32,13 @@
 //     a squared curve, shallow at first and very deep at the far end. With sides split by Skew the right side is opposite in Zones 1-7
 //     (stereo chorus); Zone 0 ignores Skew. With uRate at the middle and Depth at zero nothing is touched, bit for bit.
 //
+//   * Tempo Sync (core/ZoneMap.h): with the button on, Rate no longer sets a free-running time; its knob picks one of 13 steps of the clock
+//     (x2 on the left, 1/1 near the middle, /2 on the right) and the Clock Division menu says what the clock is (Logic's tempo at that
+//     note value). The Zone then doubles or halves the time per Zone away from the Zone that fits the clock best. A step is a JUMP, not a
+//     glide: the engine crossfades to the new time (the same 20 ms crossfade as a Zone change), so there is no pitch bend. The same goes for a
+//     new Zone, a new Clock Division, the button itself, and the best-fitting Zone changing with the tempo. With Skew the two sides pick their
+//     own steps (two multiples at once). A tempo that merely drifts is followed by the normal Rate glide. uRate and its LFO still bend the pitch.
+//
 // Window-only things from milestone 3 (never affect the sound): Logic's tempo as last heard, and two counters for the blinking
 // lights: one goes up at every tick of the tempo clock (TICK), the other every time the current delay time has passed (RATE).
 
@@ -50,9 +58,9 @@
 
 namespace mph
 {
-    // Tempo Sync is built in milestone 8. Until then the Rate knob always sets a free-running delay time, in the sound AND in
-    // the window's read-outs, whatever the Tempo Sync button says. Milestone 8 switches this on.
-    inline constexpr bool kTempoSyncAudible = false;
+    // Tempo Sync (milestone 8). When false the Rate knob always sets a free-running delay time, in the sound AND in the window's
+    // read-outs, whatever the Tempo Sync button says. Built in milestone 8 and switched on there.
+    inline constexpr bool kTempoSyncAudible = true;
 
     class Engine
     {
@@ -119,6 +127,8 @@ namespace mph
 
         double delayForRate (float rate01);                // the delay time a knob position gives (free running, or synced from milestone 8)
         double currentDelaySeconds();                      // the Rate knob's own delay time (no skew, no ping pong hop)
+        double clockPeriod() const;                        // seconds between ticks of the Clock Division (Logic's tempo, or 120 BPM)
+        core::ChannelRates sideRates();                    // the two sides' Rate knob positions (Skew moves them apart)
         struct SideDelays { double left, right; };
         SideDelays sideDelays();                           // the two sides' delay times, with Skew and the Ping Pong hop in them
         bool pingHop() const { return numChannels == 2 && params.pingPong && ! skew.skewed; }
@@ -145,6 +155,20 @@ namespace mph
         int current = 0;                                   // which read point is the audible one (the same for both channels)
         bool fading = false;                               // crossfading to the other read point (a Zone change, or any jump)
         bool lastPingHop = false;
+        // What Tempo Sync is pointing at, per side. When it changes (a new step, Zone, Clock Division, the button, or the best-fitting
+        // Zone moving with the tempo) the engine jumps with a crossfade instead of gliding. Everything is -1 while Tempo Sync is off.
+        struct SyncKey
+        {
+            int step[2] = { -1, -1 };
+            int division = -1;
+            int reference = -1;
+            bool operator== (const SyncKey& o) const
+            {
+                return step[0] == o.step[0] && step[1] == o.step[1] && division == o.division && reference == o.reference;
+            }
+            bool operator!= (const SyncKey& o) const { return ! (*this == o); }
+        };
+        SyncKey lastSyncKey;
         float fadePosition = 0.0f, fadeStep = 0.001f;
         float delayCoefficient = 0.0005f;                  // how fast Rate glides (one-pole, about 160 ms)
         float rampCoefficient = 0.002f;                    // how fast the level controls glide (one-pole, about 10 ms)

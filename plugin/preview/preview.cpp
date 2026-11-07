@@ -415,15 +415,29 @@ int main (int argc, char** argv)
             setParameter (p, MphParams::zone, 1.0f);                       // the top of the Zone menu = Zone 7
             expect (panel->getReadout().delayLeft == "41.8 s", "Zone 7, Rate fully right: 41.8 s (the longest delay time)");
 
-            // Tempo Sync is built in milestone 8: until then the button changes neither the sound nor the read-outs
+            // Tempo Sync (milestone 8): the Rate card names the step and the clock, the delay read-out is the clocked time
             resetAll (p);
             setParameter (p, MphParams::tempoSync, 1.0f);
             panel->refreshNow();
             r = panel->getReadout();
-            expect (! r.synced && r.rateText == "653 ms", "Tempo Sync on (not working yet): the Rate knob still reads the free-running 653 ms");
-            expect (r.delayLeft == "653 ms", "Tempo Sync on (not working yet): the delay read-out is still the free-running time");
+            expect (r.synced && r.rateText == "1/1 (tempo 1/4)", "Tempo Sync on: Rate in the middle reads 1/1 (tempo 1/4)");
+            expect (r.delayLeft == "500 ms" && r.delayRight == "500 ms", "Tempo Sync on: the delay read-out is 500 ms (a quarter note at 120 BPM, Zone 4)");
             setParameter (p, MphParams::rate, 1.0f);
-            expect (panel->getReadout().rateText == "1.31 s", "Rate fully right in Zone 4 reads 1.31 s with Tempo Sync on (not working yet)");
+            r = panel->getReadout();
+            expect (r.rateText == "/2 (tempo 1/4)" && r.delayLeft == "1.00 s", "Tempo Sync on: Rate fully right reads /2 (tempo 1/4), 1.00 s");
+            setParameter (p, MphParams::rate, 0.0f);
+            r = panel->getReadout();
+            expect (r.rateText == "x2 (tempo 1/4)" && r.delayLeft == "250 ms", "Tempo Sync on: Rate fully left reads x2 (tempo 1/4), 250 ms");
+            setParameter (p, MphParams::rate, 0.5f);
+            setParameter (p, MphParams::clockDivision, 4.0f / 9.0f);
+            r = panel->getReadout();
+            expect (r.rateText == "1/1 (tempo 1/4T)" && r.delayLeft == "667 ms", "Tempo Sync on, Clock Division 1/4T: 1/1 (tempo 1/4T), 667 ms (Zone 4 doubles the 333 ms that fits Zone 3)");
+            setParameter (p, MphParams::zone, 3.0f / 7.0f);
+            expect (panel->getReadout().delayLeft == "333 ms", "Tempo Sync on, Zone 3: the time halves (333 ms)");
+            setParameter (p, MphParams::tempoSync, 0.0f);
+            panel->refreshNow();
+            r = panel->getReadout();
+            expect (! r.synced && r.delayLeft == r.rateText, "Tempo Sync off again: the Rate card reads the free-running time and agrees with the delay read-out");
 
             // The read-outs of the controls that make sound say what is heard
             resetAll (p);
@@ -840,6 +854,78 @@ int main (int argc, char** argv)
             }
         }
 
+        // ---- Tempo Sync (milestone 8): the echo heard is the time the window shows ----
+        {
+            // Default Zone 4, Rate 1/1, 120 BPM assumed (no playhead here): 500 ms
+            {
+                MimicPhonProcessor q;
+                fresh (q);
+                setParameter (q, MphParams::tempoSync, 1.0f);
+                processSeconds (q, 0.1, 480);
+                MimicPhonEditor win (q);
+                win.setSize (1200, 800);
+                auto* pn = win.getStyledPanel();
+                if (pn != nullptr)
+                {
+                    pn->refreshNow();
+                    const auto r = pn->getReadout();
+                    double left = -1, right = -1;
+                    echoTimes (q, left, right);
+                    expect (std::abs (left - 0.5) < 0.003 && std::abs (right - 0.5) < 0.003, "Tempo Sync: the echo heard is 500 ms");
+                    expect (std::abs (left - seconds (r.delayLeft)) < 0.003, "Tempo Sync: the echo heard matches the Delay read-out");
+                }
+            }
+
+            // Each of the 13 steps: the echo heard matches the Rate card's step and the delay read-out
+            {
+                bool allMatch = true;
+                for (int step = 0; step < 13; ++step)
+                {
+                    MimicPhonProcessor q;
+                    fresh (q);
+                    setParameter (q, MphParams::tempoSync, 1.0f);
+                    setParameter (q, MphParams::rate, ((float) step + 0.5f) / 13.0f);
+                    processSeconds (q, 0.1, 480);
+                    MimicPhonEditor win (q);
+                    win.setSize (1200, 800);
+                    auto* pn = win.getStyledPanel();
+                    if (pn == nullptr)
+                        continue;
+                    pn->refreshNow();
+                    const auto r = pn->getReadout();
+                    double left = -1, right = -1;
+                    echoTimes (q, left, right);
+                    allMatch = allMatch && r.rateText.startsWith (mph::core::kSyncNames[step])
+                               && std::abs (left - seconds (r.delayLeft)) < 0.003 && std::abs (right - seconds (r.delayRight)) < 0.003;
+                }
+                expect (allMatch, "Tempo Sync: all 13 steps, the echo heard matches the Rate card's step and the delay read-out");
+            }
+
+            // With Skew the sides sit on different steps: the card names both, and the echoes heard match
+            {
+                MimicPhonProcessor q;
+                fresh (q);
+                setParameter (q, MphParams::tempoSync, 1.0f);
+                setParameter (q, MphParams::skew, 1.0f);
+                processSeconds (q, 0.1, 480);
+                setParameter (q, MphParams::rate, 0.8f);
+                processSeconds (q, 0.5, 480);
+                MimicPhonEditor win (q);
+                win.setSize (1200, 800);
+                auto* pn = win.getStyledPanel();
+                if (pn != nullptr)
+                {
+                    pn->refreshNow();
+                    const auto r = pn->getReadout();
+                    double left = -1, right = -1;
+                    echoTimes (q, left, right);
+                    expect (r.rateText == "L x1 2/3  R /1 2/3", "Tempo Sync with Skew: the Rate card names both sides' steps");
+                    expect (r.delayLeft == "300 ms" && r.delayRight == "833 ms", "Tempo Sync with Skew: L 300 ms, R 833 ms");
+                    expect (std::abs (left - 0.3) < 0.003 && std::abs (right - 0.8333) < 0.003, "Tempo Sync with Skew: the echoes heard match (300 and 833 ms)");
+                }
+            }
+        }
+
         // The plain window carries the same buttons and controls (nothing was added or removed)
         expect (proc.getParameters().size() == 21, "still 21 parameters: no control id was added or removed");
     }
@@ -863,6 +949,24 @@ int main (int argc, char** argv)
         processSeconds (lfoProc, 0.3, 480);
         letWindowThreadRun (150);
         save (lfoEditor, outDir.getChildFile ("styled_panel_urate.png"), 1.0f);
+    }
+
+    // ---------------- a picture with Tempo Sync on and Skew putting the two sides on different steps ----------------
+    {
+        MimicPhonProcessor syncProc;
+        syncProc.setPlayConfigDetails (2, 2, 48000.0, 512);
+        syncProc.prepareToPlay (48000.0, 512);
+        resetAll (syncProc);
+        MimicPhonEditor syncEditor (syncProc);
+        syncEditor.showView (MimicPhonEditor::View::styled);
+        syncEditor.setSize (1200, 800);
+        setParameter (syncProc, MphParams::tempoSync, 1.0f);
+        setParameter (syncProc, MphParams::skew, 1.0f);
+        processSeconds (syncProc, 0.1, 480);
+        setParameter (syncProc, MphParams::rate, 0.8f);
+        processSeconds (syncProc, 0.3, 480);
+        letWindowThreadRun (150);
+        save (syncEditor, outDir.getChildFile ("styled_panel_sync.png"), 1.0f);
     }
 
     // ---------------- a picture with Skew pulling L and R apart and Swap on (its own plugin object: the audio has to run for the engine to know) ----------------

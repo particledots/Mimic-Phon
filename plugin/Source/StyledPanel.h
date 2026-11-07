@@ -7,7 +7,7 @@
 // The read-outs of the controls that make sound (milestone 4: Input and Output Level, Mix, Repeats, Zone, Rate) use the engine's own
 // functions (core/Gain.h, core/Repeats.h, core/ZoneMap.h), so the number shown is the number heard. For the controls that do not make
 // sound yet, the read-out is a first guess at what the position will mean (a percentage, semitones, Hertz); these are tuned together
-// with the sound in the later milestones. The control ids never change. Tempo Sync shows free-running times until milestone 8.
+// with the sound in the later milestones. The control ids never change. With Tempo Sync on (milestone 8) the Rate card names the clock step and the delay read-out is the clocked time.
 //
 // The panel is laid out in a fixed 1200 x 800 space; the editor scales it to the window.
 // (The look-and-feel, fonts, KnobCard and the chip selector follow PhenomeEon's StyledPanel, copied and renamed.)

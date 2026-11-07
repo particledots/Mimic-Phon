@@ -505,14 +505,11 @@ double MimicPhonStyledPanel::currentDelaySeconds (float rate) const
 
     const int zone = juce::jlimit (0, mph::kNumZones - 1, (int) std::lround (get (MphParams::zone)));
 
-    // Tempo Sync is built in milestone 8; until then the sound is free-running whatever the button says, so the read-out is too.
+    // With Tempo Sync on, the same function and the same clock as the engine's (Logic's tempo, or 120 BPM when Logic gives none)
     if (mph::kTempoSyncAudible && get (MphParams::tempoSync) > 0.5f)
     {
         const int division = juce::jlimit (0, mph::core::kNumClockDivisions - 1, (int) std::lround (get (MphParams::clockDivision)));
-        double bpm = (double) engine.getHostBpm();
-        if (! (bpm > 0.0))
-            bpm = 120.0;
-        const double period = mph::core::beatsPerTick (division, (double) engine.getHostBeatsPerBar()) * 60.0 / bpm;
+        const double period = mph::core::clockPeriodSeconds (division, (double) engine.getHostBeatsPerBar(), (double) engine.getHostBpm());
         return mph::core::syncDelaySeconds (zone, rate, period);
     }
     return mph::core::freeDelaySeconds (zone, rate);
@@ -553,7 +550,13 @@ MimicPhonStyledPanel::Readout MimicPhonStyledPanel::getReadout() const
     const float bpm = engine.getHostBpm();
     r.tempo = bpm > 0.0f ? "TEMPO " + juce::String (bpm, 1) + " BPM" : juce::String ("TEMPO 120.0 (assumed)");
 
-    if (r.skewed)
+    if (r.skewed && r.synced)
+    {
+        // Tempo Sync with the sides split: each side sits on its own step of the clock (two multiples at once)
+        r.rateText = "L " + juce::String (mph::core::kSyncNames[mph::core::syncStep (rateLeft)])
+                     + "  R " + juce::String (mph::core::kSyncNames[mph::core::syncStep (rateRight)]);
+    }
+    else if (r.skewed)
     {
         // The Rate knob is pulling the two sides apart (or has left a split behind): say how far, and which side is faster
         const float skew = skewState.skewNow (rate);

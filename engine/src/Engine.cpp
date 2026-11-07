@@ -67,6 +67,7 @@ void Engine::prepare (double newSampleRate, int newMaxBlockSize, int newNumChann
     clearWasOn = false;
     lastZone = -1;
     lastPingHop = false;
+    lastSyncKey = SyncKey();
     current = 0;
     fading = false;
     fadePosition = 0.0f;
@@ -85,11 +86,28 @@ void Engine::setParams (const Params& p)
     publishTargets();
 }
 
+// The clock the Clock Division menu stands for: Logic's tempo at that note value (120 BPM when Logic gives none). The window calls
+// the same core function with the same inputs.
+double Engine::clockPeriod() const
+{
+    return core::clockPeriodSeconds (params.clockDivision, host.beatsPerBar, host.tempoValid ? host.bpm : 0.0);
+}
+
 double Engine::delayForRate (float rate01)
 {
     if (kTempoSyncAudible && params.tempoSync)
-        return core::syncDelaySeconds (params.zone, rate01, clock.beatsPerTickNow() * clock.secondsPerBeat());
+        return core::syncDelaySeconds (params.zone, rate01, clockPeriod());
     return core::freeDelaySeconds (params.zone, rate01);
+}
+
+// The Rate knob position each side listens to: both the knob itself, or pulled apart by Skew (two channels only).
+core::ChannelRates Engine::sideRates()
+{
+    core::ChannelRates r;
+    r.left = r.right = params.rate;
+    if (numChannels == 2)
+        r = skew.ratesNow (params.rate);
+    return r;
 }
 
 double Engine::currentDelaySeconds()
@@ -100,14 +118,8 @@ double Engine::currentDelaySeconds()
 // The two sides' delay times. Skew moves them apart; the Ping Pong hop halves both (each bounce is half the delay time).
 Engine::SideDelays Engine::sideDelays()
 {
-    float left = params.rate, right = params.rate;
-    if (numChannels == 2)
-    {
-        const core::ChannelRates r = skew.ratesNow (params.rate);
-        left = r.left;
-        right = r.right;
-    }
-    SideDelays d { delayForRate (left), delayForRate (right) };
+    const core::ChannelRates r = sideRates();
+    SideDelays d { delayForRate (r.left), delayForRate (r.right) };
     if (pingHop())
     {
         d.left *= core::kPingPongHop;
@@ -165,13 +177,8 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
 
     // The RATE light: one blink per delay time of the Rate knob's own time; with the two sides skewed, a blink for each side.
     {
-        float rateLeft = params.rate, rateRight = params.rate;
-        if (numChannels == 2)
-        {
-            const core::ChannelRates r = skew.ratesNow (params.rate);
-            rateLeft = r.left;
-            rateRight = r.right;
-        }
+        const core::ChannelRates r = sideRates();
+        const float rateLeft = r.left, rateRight = r.right;
         ratePhase += (double) numSamples / (delayForRate (rateLeft) * sampleRate);
         if (ratePhase >= 1.0)
         {
@@ -238,6 +245,18 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
     // Skew button press that moves the times) goes to the other one of the pair and crossfades.
     const double logLive[2] = { std::log (sides.left), std::log (sides.right) };
     const bool skewJump = skew.takeJump();
+    // Tempo Sync: which step each side is on (and which clock). A change is a jump in time, crossfaded like a Zone change.
+    SyncKey syncKey;
+    if (kTempoSyncAudible && params.tempoSync)
+    {
+        const core::ChannelRates r = sideRates();
+        syncKey.step[0] = core::syncStep (r.left);
+        syncKey.step[1] = core::syncStep (r.right);
+        syncKey.division = params.clockDivision;
+        syncKey.reference = core::bestZoneForPeriod (clockPeriod());
+    }
+    const bool syncJump = started && syncKey != lastSyncKey;
+    lastSyncKey = syncKey;
     if (! started)
     {
         inputGain.snap (inputGain.target);
@@ -267,7 +286,7 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
         lastPingHop = pingHopNow;
         started = true;
     }
-    else if (params.zone != lastZone || pingHopNow != lastPingHop || skewJump)
+    else if (params.zone != lastZone || pingHopNow != lastPingHop || skewJump || syncJump)
     {
         lastZone = params.zone;
         lastPingHop = pingHopNow;

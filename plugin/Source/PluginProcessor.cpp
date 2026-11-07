@@ -99,7 +99,7 @@ void MimicPhonProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
     for (int c = getTotalNumInputChannels(); c < getTotalNumOutputChannels(); ++c)
         buffer.clear (c, 0, buffer.getNumSamples());
 
-    // What Logic says about tempo and song position (tempo sync follows it, from milestone 8 on).
+    // What Logic says about tempo and song position (Tempo Sync and the LFO Sync follow it).
     mph::core::HostInfo host;
     if (auto* hostPlayHead = getPlayHead())
     {
