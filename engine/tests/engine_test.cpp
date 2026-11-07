@@ -7,6 +7,7 @@
 // milestone 9 adds Halo: the rules, off bit for bit, the halo with Repeats fully left (Filter-Verb), size and tail, width, Color's timbre, no run-away;
 // milestone 10 adds Flip: the rules, off bit for bit, every repeat reversed, chunk length, no doppler from Rate, uRate still bends, Skew / Ping Pong / Tempo Sync / Clear / Color / Halo with Flip, stability).
 // milestone 11 adds Hold: the rules, no click or jump on press, the input ignored, the loop as long as the delay and seamless, Repeats scrubbing the start point, release, no doppler from Rate, Tempo Sync, Color / Halo / Flip / Skew / Ping Pong / uRate / Clear / Zone with Hold, mono, host tail, stability).
+// milestone 12 adds the Hold Range switch (Zone = 0.11.0 bit for bit, Full = the whole 41.8 s memory), long sessions, CPU, mono and every sample rate from 22.05 to 192 kHz.
 // Prints "engine tests: N checks, F failed" and exits with 0 only if nothing failed.
 
 #include <mph/Engine.h>
@@ -21,6 +22,7 @@
 #include <mph/core/URate.h>
 #include <mph/core/ZoneMap.h>
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -66,6 +68,7 @@ namespace
         expect (p.uRateLfoShape == mph::kLfoSine, "default LFO shape is sine");
         expect (! p.hold && ! p.flip && ! p.skew && ! p.pingPong && ! p.clear && ! p.tempoSync && ! p.uRateLfoSync,
                 "all buttons start off");
+        expect (! p.holdFull, "the Hold Range switch starts on Zone");
         expect (p.uRateLfoDepth == 0.0f, "no modulation until asked for");
     }
 
@@ -3773,6 +3776,507 @@ namespace
             expect (ok && worst < 4.0, "Hold in Zone 7 at 41.8 s with the start point scrubbing, Flip, Halo fully right, uRate and its LFO at the far ends, 50 s of loud noise: bounded");
         }
     }
+    // ======================= milestone 12: Hold Range, long sessions, CPU, sample rates =======================
+
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_UNDEFINED__)
+    constexpr bool kSanitized = true;       // the sanitizer builds are several times slower: shorter sessions, no speed checks
+#else
+    constexpr bool kSanitized = false;
+#endif
+
+    void testHoldRangeRules()
+    {
+        using namespace mph;
+        const mph::Params p;
+        expect (! p.holdFull, "Hold Range: starts on Zone (off)");
+
+        // Zone: exactly the rule of 0.11.0, worked out here independently
+        bool sameAsBefore = true;
+        for (int zone = 0; zone < 8; ++zone)
+            for (double loop : { 0.002, 0.01, 0.2, 0.5, 1.306, 3.0, 20.0 })
+                for (float k : { 0.0f, 0.1f, 0.5f, 0.77f, 1.0f })
+                {
+                    const double room = std::min (kZones[zone].maxSeconds, core::kHoldMaxLoopSeconds) - loop;
+                    const double wanted = room > 0.0 ? (double) k * room : 0.0;
+                    sameAsBefore = sameAsBefore && core::holdStartSeconds (k, zone, loop) == wanted && core::holdStartSeconds (k, zone, loop, false) == wanted;
+                }
+        expect (sameAsBefore, "Hold Range = Zone: the start point is exactly the 0.11.0 rule in every Zone");
+
+        // Full: the memory's whole length whatever the Zone
+        bool fullIgnoresZone = true;
+        for (int zone = 0; zone < 8; ++zone)
+            fullIgnoresZone = fullIgnoresZone && core::holdStartSeconds (0.5f, zone, 0.2, true) == core::holdStartSeconds (0.5f, 7, 0.2, true);
+        expect (fullIgnoresZone, "Hold Range = Full: the Zone makes no difference to how far back Repeats reaches");
+        expect (std::fabs (core::holdStartSeconds (1.0f, 2, 0.2, true) - (core::kHoldMaxLoopSeconds - 0.2)) < 1.0e-9, "Hold Range = Full: Repeats fully right = the whole memory minus the loop (Zone 2 here)");
+        expect (core::holdStartSeconds (0.0f, 2, 0.2, true) == 0.0, "Hold Range = Full: Repeats fully left = the newest stretch, as before");
+        expect (std::fabs (core::holdStartSeconds (0.5f, 2, 0.2, true) - 0.5 * (core::kHoldMaxLoopSeconds - 0.2)) < 1.0e-9, "Hold Range = Full: Repeats half way = half the memory back");
+        expect (core::holdStartSeconds (1.0f, 7, 1.0, true) == core::holdStartSeconds (1.0f, 7, 1.0, false), "Hold Range: in Zone 7 Zone and Full are the same");
+        expect (core::holdStartSeconds (1.0f, 4, 1.306, true) > 40.0, "Hold Range = Full: a loop as long as Zone 4 still leaves about 40 s to scrub");
+        expect (core::holdStartSeconds (1.0f, 0, 41.7, true) < 0.1 && core::holdStartSeconds (1.0f, 0, 50.0, true) == 0.0, "Hold Range = Full: a loop as long as the memory leaves nothing to scrub");
+    }
+
+    void testHoldRangeSound()
+    {
+        using namespace mph;
+        std::mt19937 rng (1200);
+        std::uniform_real_distribution<float> noise (-0.5f, 0.5f), unit (0.0f, 1.0f);
+
+        // ---- Full reaches far back through a stored ramp; Zone does not ----
+        {
+            const double delay = 0.2, slope = 5.0e-7;
+            const int total = atSeconds (26.0);
+            const int pressBlock = blockAt (24.0);
+            const int press = sampleOfBlock (pressBlock);
+            double means[2] = { 0, 0 };
+            for (int full = 0; full < 2; ++full)
+            {
+                mph::Params p = repeatsOnly (2, rateForDelay (2, delay), 0.0f);
+                const auto out = runFlip (p, rampSignal (total, (float) slope), {}, 2, nullptr, [pressBlock, full] (int block, mph::Params& q)
+                {
+                    q.hold = block >= pressBlock;
+                    q.holdFull = full == 1;
+                    q.repeats = block >= pressBlock ? 0.5f : 0.0f;
+                });
+                const int a = press + atSeconds (1.0);
+                means[full] = meanOf (out.l, a, a + atSeconds (delay));
+                const double start = core::holdStartSeconds (0.5f, 2, delay, full == 1);
+                const double wanted = slope * ((double) press - start * kSr - 0.5 * delay * kSr);
+                expect (std::fabs (means[full] - wanted) < 0.08 * std::fabs (wanted) + 0.002,
+                        full == 1 ? "Hold Range = Full: Repeats half way plays the loop from about 20.8 s back (a Zone 2 loop)"
+                                  : "Hold Range = Zone: Repeats half way stays inside Zone 2's memory (about 63 ms back)");
+            }
+            expect (means[0] > 5.0 * means[1], "Hold Range: Full really is much further back than Zone");
+        }
+
+        // ---- the switch while held is a crossfaded jump, not a click ----
+        {
+            const int total = atSeconds (17.0);
+            const int pressBlock = blockAt (14.0), switchBlock = blockAt (15.0);
+            const int switchAt = sampleOfBlock (switchBlock);
+            const auto in = sineSignal (total, 440.0, 0.5f);
+            mph::Params p = repeatsOnly (4, rateForDelay (4, 0.5), 0.0f);
+            const auto out = runFlip (p, in, {}, 2, nullptr, [pressBlock, switchBlock] (int block, mph::Params& q)
+            {
+                q.hold = block >= pressBlock;
+                q.repeats = block >= pressBlock ? 0.3f : 0.0f;
+                q.holdFull = block >= switchBlock;
+            });
+            const double normal = 2.0 * 3.14159265358979323846 * 440.0 / kSr * 0.5;
+            expect (maxStep (out.l, switchAt - 200, switchAt + atSeconds (0.4)) < 2.0 * normal + 1.0e-4, "Hold Range: switching Zone -> Full while held crossfades: no click");
+            const auto back = runFlip (p, in, {}, 2, nullptr, [pressBlock, switchBlock] (int block, mph::Params& q)
+            {
+                q.hold = block >= pressBlock;
+                q.repeats = block >= pressBlock ? 0.3f : 0.0f;
+                q.holdFull = block < switchBlock && block >= pressBlock - 4;
+            });
+            expect (maxStep (back.l, switchAt - 200, switchAt + atSeconds (0.4)) < 2.0 * normal + 1.0e-4, "Hold Range: switching Full -> Zone while held crossfades: no click");
+        }
+
+        // ---- Hold off: the switch changes nothing, bit for bit; Zone 7: Zone and Full are the same sound ----
+        {
+            const int total = atSeconds (8.0);
+            const auto in = [&] { std::vector<float> v ((size_t) total); for (auto& x : v) x = noise (rng); return v; } ();
+            mph::Params p = repeatsOnly (5, 0.4f, 0.6f);
+            p.halo = 0.3f; p.color = 0.4f; p.skew = true; p.rate = 0.6f;
+            const auto a = runFlip (p, in, in, 2, nullptr, [] (int, mph::Params& q) { q.holdFull = false; });
+            const auto b = runFlip (p, in, in, 2, nullptr, [] (int, mph::Params& q) { q.holdFull = true; });
+            expect (identical (a.l, b.l) && identical (a.r, b.r), "Hold Range: with Hold off the switch changes nothing, bit for bit");
+
+            mph::Params z7 = repeatsOnly (7, rateForDelay (7, 3.0), 0.5f);
+            const int pressBlock = blockAt (5.0);
+            auto hold = [pressBlock] (bool full) { return [pressBlock, full] (int block, mph::Params& q) { q.hold = block >= pressBlock; q.holdFull = full; }; };
+            const auto zoneRun = runFlip (z7, in, in, 2, nullptr, hold (false));
+            const auto fullRun = runFlip (z7, in, in, 2, nullptr, hold (true));
+            expect (identical (zoneRun.l, fullRun.l) && identical (zoneRun.r, fullRun.r), "Hold Range: in Zone 7 (already the whole memory) Zone and Full sound exactly alike");
+        }
+
+        // ---- Full with everything else (Flip, Halo, Skew, Ping Pong, Color, uRate), stereo and mono: bounded and alive ----
+        for (int channels = 1; channels <= 2; ++channels)
+        {
+            mph::Engine e;
+            e.prepare (kSr, 512, channels);
+            std::vector<float> l (512), r (512);
+            bool ok = true, alive = false;
+            double worst = 0.0;
+            for (int block = 0; block < 1500; ++block)
+            {
+                mph::Params p;
+                p.hold = block > 700;
+                p.holdFull = block > 700 && block < 1100;
+                p.repeats = block < 900 ? 0.5f : 1.0f;
+                p.zone = 3;
+                p.flip = block > 1200;
+                p.halo = 0.6f;
+                p.color = 0.3f;
+                p.skew = true; p.rate = 0.7f;
+                p.pingPong = channels == 2 && block > 1000;
+                p.uRate = 0.8f;
+                for (size_t i = 0; i < l.size(); ++i) { l[i] = noise (rng); r[i] = noise (rng); }
+                float* chans[2] = { l.data(), r.data() };
+                e.setParams (p);
+                e.process (chans, channels, 512);
+                for (size_t i = 0; i < l.size(); ++i)
+                {
+                    ok = ok && std::isfinite (l[i]) && std::isfinite (r[i]);
+                    worst = std::max (worst, (double) std::max (std::fabs (l[i]), std::fabs (r[i])));
+                }
+                if (block > 1400)
+                    alive = alive || std::fabs (l[100]) > 1.0e-4f;
+            }
+            expect (ok && worst < 4.0, channels == 1 ? "Hold Range = Full, mono, with Flip / Halo / Skew / uRate: bounded" : "Hold Range = Full, stereo, with Flip / Halo / Skew / Ping Pong / uRate: bounded");
+            expect (alive, channels == 1 ? "Hold Range, mono: the held loop is still sounding" : "Hold Range, stereo: the held loop is still sounding");
+        }
+    }
+
+    // The sample rates Logic can run at, mono and stereo: echo time, Hold loop, Zone 0 and Zone 7, and changing the rate under a running engine.
+    void testSampleRates()
+    {
+        using namespace mph;
+        std::mt19937 rng (2200);
+        std::uniform_real_distribution<float> noise (-0.5f, 0.5f);
+        const double rates[7] = { 22050.0, 32000.0, 44100.0, 48000.0, 88200.0, 96000.0, 192000.0 };
+
+        // runs the engine at a rate over a signal, 512-sample blocks
+        auto runAt = [] (double sr, int channels, mph::Params p, std::vector<float> in, const std::function<void (int, mph::Params&)>& change = {})
+        {
+            mph::Engine e;
+            e.prepare (sr, 512, channels);
+            std::vector<float> out = std::move (in);
+            std::vector<float> right = out;
+            for (int done = 0, block = 0; done < (int) out.size(); done += 512, ++block)
+            {
+                const int n = std::min (512, (int) out.size() - done);
+                if (change) change (block, p);
+                e.setParams (p);
+                float* chans[2] = { out.data() + done, right.data() + done };
+                e.process (chans, channels, n);
+            }
+            return out;
+        };
+
+        for (double sr : rates)
+            for (int channels = 1; channels <= 2; ++channels)
+            {
+                const auto at = [sr] (double seconds) { return (int) std::lround (seconds * sr); };
+
+                // one echo at 0.5 s (Zone 4): an impulse after the delay has settled comes back at 0.5 s
+                {
+                    const int total = at (6.0), impulseAt = at (3.0);
+                    std::vector<float> in ((size_t) total, 0.0f);
+                    in[(size_t) impulseAt] = 0.5f;
+                    mph::Params p = repeatsOnly (4, rateForDelay (4, 0.5));
+                    const auto out = runAt (sr, channels, p, in);
+                    const int peak = peakIndex (out, impulseAt + at (0.1), total);
+                    const double heard = (double) (peak - impulseAt) / sr;
+                    expect (std::fabs (heard - 0.5) < 0.0003, "sample rates: an echo of a 0.5 s delay comes back at 0.5 s (22.05 to 192 kHz, mono and stereo)");
+                }
+
+                // Zone 0: a short delay is not lost to the minimum of a few samples (1.3 ms is 28 samples at 22.05 kHz)
+                {
+                    const int total = at (1.0), impulseAt = at (0.5);
+                    std::vector<float> in ((size_t) total, 0.0f);
+                    in[(size_t) impulseAt] = 0.5f;
+                    mph::Params p = repeatsOnly (0, 0.0f);
+                    const auto out = runAt (sr, channels, p, in);
+                    const int peak = peakIndex (out, impulseAt + 2, total);
+                    expect (std::fabs ((double) (peak - impulseAt) / sr - 0.0013) < 2.0 / sr + 0.00005, "sample rates: Zone 0 at its shortest (1.3 ms) is 1.3 ms at every rate");
+                }
+
+                // Zone 7 at the longest: the 41.8 s memory is big enough at every rate (an impulse comes back after 41.7 s)
+                if (sr <= 96000.0)
+                {
+                    const int total = at (90.0), impulseAt = at (2.0);
+                    std::vector<float> in ((size_t) total, 0.0f);
+                    in[(size_t) impulseAt] = 0.5f;
+                    mph::Params p = repeatsOnly (7, 1.0f);
+                    const auto out = runAt (sr, channels, p, in);
+                    const int peak = peakIndex (out, impulseAt + at (1.0), total);
+                    expect (std::fabs ((double) (peak - impulseAt) / sr - 41.796) < 0.01, "sample rates: Zone 7 at the longest is 41.8 s at every rate up to 96 kHz");
+                }
+
+                // Hold at the rate: the loop is as long as the delay and goes on sounding, finite and bounded
+                {
+                    const int total = at (12.0);
+                    std::vector<float> in ((size_t) total);
+                    for (auto& x : in) x = noise (rng);
+                    mph::Params p = repeatsOnly (4, rateForDelay (4, 0.5), 0.05f);        // (Full at 0.05 reaches 2 s back: inside what was heard before the press)
+                    const int pressBlock = (int) (at (4.0) / 512);
+                    const auto out = runAt (sr, channels, p, in, [pressBlock] (int block, mph::Params& q) { q.hold = block >= pressBlock; q.holdFull = block >= pressBlock + 200; });
+                    bool ok = true;
+                    double worst = 0.0;
+                    for (float v : out) { ok = ok && std::isfinite (v); worst = std::max (worst, (double) std::fabs (v)); }
+                    expect (ok && worst < 2.0, "sample rates: Hold (Zone and Full) is finite and bounded");
+                    expect (energy (out, at (10.0), at (12.0)) > 1.0, "sample rates: the held loop is still sounding after 6 s");
+                    // periodic with the loop length: a pass later the loop is the same sound (not exactly: the Color / seam are the same, so nearly)
+                    const int pass = at (0.5), from = at (9.0);
+                    double diff = 0.0, ref = 0.0;
+                    for (int i = from; i < from + at (0.3); ++i) { diff += std::fabs ((double) out[(size_t) i] - (double) out[(size_t) (i + pass)]); ref += std::fabs ((double) out[(size_t) i]); }
+                    expect (diff < 0.02 * ref + 1.0e-6, "sample rates: the held loop repeats itself every 0.5 s");
+                }
+            }
+
+        // changing the sample rate under a running engine (Logic does this): prepare again = a fresh engine, bit for bit
+        {
+            const int total = (int) (48000.0 * 5.0);
+            std::vector<float> in ((size_t) total);
+            for (auto& x : in) x = noise (rng);
+            mph::Params p = repeatsOnly (4, 0.5f, 0.6f);
+            p.halo = 0.5f; p.color = 0.3f; p.skew = true; p.flip = true;
+            const int pressBlock = 150;
+            auto change = [pressBlock] (int block, mph::Params& q) { q.hold = block >= pressBlock; };
+
+            const auto fresh = runFlip (p, in, in, 2, nullptr, change);
+
+            mph::Engine e;
+            e.prepare (44100.0, 256, 2);                                         // first a noisy life at another rate, with Hold and Halo going
+            {
+                std::vector<float> a (256), b (256);
+                for (int block = 0; block < 600; ++block)
+                {
+                    mph::Params q = p;
+                    q.hold = block > 200; q.halo = 0.9f; q.uRateLfoDepth = 0.5f;
+                    for (size_t i = 0; i < a.size(); ++i) { a[i] = noise (rng); b[i] = noise (rng); }
+                    float* chans[2] = { a.data(), b.data() };
+                    e.setParams (q);
+                    e.process (chans, 2, 256);
+                }
+            }
+            e.prepare (kSr, 512, 2);
+            std::vector<float> l = in, r = in;
+            mph::Params q = p;
+            int block = 0;
+            for (int done = 0; done < total; done += 512, ++block)
+            {
+                const int n = std::min (512, total - done);
+                change (block, q);
+                e.setParams (q);
+                float* chans[2] = { l.data() + done, r.data() + done };
+                e.process (chans, 2, n);
+            }
+            expect (identical (l, fresh.l) && identical (r, fresh.r), "changing the sample rate (prepare again) leaves nothing of the old life: bit for bit a fresh engine");
+        }
+    }
+
+    // How fast the engine runs (audio seconds per CPU second), settings from empty to the worst case.
+    double speedOf (double sr, int channels, const mph::Params& p, double seconds)
+    {
+        mph::Engine e;
+        e.prepare (sr, 512, channels);
+        std::mt19937 rng (77);
+        std::uniform_real_distribution<float> noise (-0.5f, 0.5f);
+        std::vector<float> l (512), r (512);
+        mph::core::HostInfo host;
+        host.tempoValid = true; host.bpm = 123.0; host.playing = true; host.ppqValid = true;
+        const int blocks = (int) (seconds * sr / 512.0);
+        e.setParams (p);
+        for (int warm = 0; warm < 40; ++warm)                                    // (the filling of the first buffers is not the steady state)
+        {
+            for (size_t i = 0; i < l.size(); ++i) { l[i] = noise (rng); r[i] = noise (rng); }
+            float* chans[2] = { l.data(), r.data() };
+            e.process (chans, channels, 512);
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int block = 0; block < blocks; ++block)
+        {
+            for (size_t i = 0; i < l.size(); ++i) { l[i] = noise (rng); r[i] = noise (rng); }
+            host.ppq = (double) block * 512.0 / sr * host.bpm / 60.0;
+            e.setHost (host);
+            float* chans[2] = { l.data(), r.data() };
+            e.process (chans, channels, 512);
+        }
+        const double cpu = std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count();
+        return (double) blocks * 512.0 / sr / std::max (cpu, 1.0e-6);
+    }
+
+    void testSpeed()
+    {
+        mph::Params empty;                                             // the defaults: one echo of the repeater, nothing else
+        mph::Params typical;
+        typical.repeats = 0.6f; typical.halo = 0.4f; typical.color = 0.6f; typical.uRateLfoDepth = 0.3f;
+        mph::Params worst;                                             // everything that costs something at once
+        worst.zone = 7; worst.rate = 0.9f; worst.repeats = 0.9f; worst.halo = 1.0f; worst.color = 0.15f; worst.skew = true; worst.pingPong = true;
+        worst.flip = true; worst.uRate = 0.9f; worst.uRateLfoDepth = 0.6f; worst.uRateLfoRate = 0.7f; worst.tempoSync = true; worst.mix = 0.6f;
+        mph::Params worstHold = worst;
+        worstHold.hold = true; worstHold.holdFull = true; worstHold.repeats = 0.5f;
+
+        const double seconds = kSanitized ? 4.0 : 20.0;
+        const double sEmpty = speedOf (48000.0, 2, empty, seconds), sTyp = speedOf (48000.0, 2, typical, seconds);
+        const double sWorst = speedOf (48000.0, 2, worst, seconds), sHold = speedOf (48000.0, 2, worstHold, seconds);
+        const double sWorst96 = speedOf (96000.0, 2, worst, seconds), sWorst192 = speedOf (192000.0, 2, worst, seconds);
+        const double sMono = speedOf (48000.0, 1, worst, seconds);
+        std::printf ("CPU (audio seconds per CPU second, one core of this machine, stereo 48 kHz unless noted): empty %.0fx, typical %.0fx, worst case %.0fx, worst case with Hold + Full %.0fx, "
+                     "worst case mono %.0fx, worst case 96 kHz %.0fx, 192 kHz %.0fx%s\n",
+                     sEmpty, sTyp, sWorst, sHold, sMono, sWorst96, sWorst192, kSanitized ? " (sanitizer build: not meaningful)" : "");
+        if (! kSanitized)
+        {
+            expect (sEmpty > 20.0 && sTyp > 10.0, "CPU: the usual settings run at least 10x faster than real time on one core");
+            expect (sWorst > 4.0 && sHold > 4.0, "CPU: the worst case (everything on, Zone 7, Flip, Halo, Skew, Ping Pong, LFO, Tempo Sync, Hold + Full) runs at least 4x faster than real time");
+            expect (sWorst192 > 1.5, "CPU: the worst case at 192 kHz still runs faster than real time with room to spare");
+        }
+        else
+            expect (sWorst > 0.0, "CPU: (sanitizer build) the speed checks are skipped");
+    }
+
+    // A long session: settings thrown about every second or two, loud and silent passages, odd block sizes; then everything is put back and it must fall silent.
+    void testLongSession()
+    {
+        const double sessionSeconds = kSanitized ? 90.0 : 1800.0;      // half an hour of audio (a minute and a half under the sanitizers)
+        std::mt19937 rng (31337);
+        std::uniform_real_distribution<float> noise (-1.0f, 1.0f), unit (0.0f, 1.0f);
+
+        mph::Engine e;
+        e.prepare (kSr, 2048, 2);
+        std::vector<float> l (2048), r (2048);
+        bool finite = true;
+        double worst = 0.0;
+        double remaining = sessionSeconds, sinceChange = 1000.0, sinceLevel = 0.0;
+        float inputGain = 0.4f;
+        mph::Params p;
+        long long samples = 0;
+        bool loudPassage = true;
+        double cpuFirst = 0.0, cpuLast = 0.0;
+        const double stampFirst = 60.0, stampLast = sessionSeconds - 60.0;
+        while (remaining > 0.0)
+        {
+            const int n = 1 + (int) (rng() % 2048);
+            if (sinceChange > 1.0 + 2.0 * unit (rng))
+            {
+                sinceChange = 0.0;
+                p.hold = (rng() % 3) == 0;
+                p.holdFull = (rng() % 2) == 0;
+                p.flip = (rng() % 4) == 0;
+                p.skew = (rng() % 3) == 0;
+                p.pingPong = (rng() % 3) == 0;
+                p.tempoSync = (rng() % 4) == 0;
+                p.uRateLfoSync = (rng() % 4) == 0;
+                p.clear = (rng() % 25) == 0;
+                p.zone = (int) (rng() % 8);
+                p.repeats = (rng() % 3 == 0) ? 1.0f : unit (rng);
+                p.halo = (rng() % 3 == 0) ? 1.0f : unit (rng);
+                p.color = unit (rng); p.rate = unit (rng); p.uRate = unit (rng);
+                p.uRateLfoRate = unit (rng); p.uRateLfoDepth = unit (rng); p.mix = unit (rng);
+                p.inputGainStep = (int) (rng() % 4);
+                p.clockDivision = (int) (rng() % 10);
+                p.uRateLfoShape = (int) (rng() % 2);
+            }
+            if (sinceLevel > 3.0)
+            {
+                sinceLevel = 0.0;
+                loudPassage = ! loudPassage;
+                inputGain = loudPassage ? (rng() % 5 == 0 ? 1.0f : 0.4f) : 0.0f;
+            }
+            mph::core::HostInfo host;
+            host.tempoValid = true; host.bpm = 60.0 + 100.0 * unit (rng);
+            host.playing = (rng() % 2) == 0; host.ppqValid = true; host.ppq = (double) samples / kSr * 2.0;
+            e.setHost (host);
+            for (int i = 0; i < n; ++i) { l[(size_t) i] = inputGain * noise (rng); r[(size_t) i] = inputGain * noise (rng); }
+            float* chans[2] = { l.data(), r.data() };
+            e.setParams (p);
+            e.process (chans, 2, n);
+            for (int i = 0; i < n; ++i)
+            {
+                finite = finite && std::isfinite (l[(size_t) i]) && std::isfinite (r[(size_t) i]);
+                worst = std::max (worst, (double) std::max (std::fabs (l[(size_t) i]), std::fabs (r[(size_t) i])));
+            }
+            samples += n;
+            const double dt = (double) n / kSr;
+            remaining -= dt; sinceChange += dt; sinceLevel += dt;
+        }
+        expect (finite, "long session (half an hour of audio, settings thrown about): every sample finite");
+        expect (worst < 4.0, "long session: the output never runs away (peak under 4)");
+
+        // everything back to plain: Hold off, Flip off, Halo off, Repeats left; a few seconds of silence must give exact silence
+        mph::Params calm;
+        calm.mix = 1.0f; calm.repeats = 0.0f; calm.halo = 0.0f; calm.zone = 4; calm.rate = 0.5f;
+        std::vector<float> a (512), b (512);
+        double lateEnergy = 0.0;
+        for (int block = 0; block < (int) (12.0 * kSr / 512.0); ++block)
+        {
+            std::fill (a.begin(), a.end(), 0.0f); std::fill (b.begin(), b.end(), 0.0f);
+            float* chans[2] = { a.data(), b.data() };
+            e.setParams (calm);
+            e.process (chans, 2, 512);
+            if (block > (int) (6.0 * kSr / 512.0))
+                for (size_t i = 0; i < a.size(); ++i)
+                    lateEnergy += (double) a[i] * a[i] + (double) b[i] * b[i];
+        }
+        expect (lateEnergy < 1.0e-12, "long session: put back to plain and fed silence it falls completely silent (no stuck tone, no leftover)");
+    }
+
+    // The engine must not slow down after a long session (denormals, runaway buffers): the same worst-case settings, fresh and after the session
+    void testNoSlowdown()
+    {
+        if (kSanitized)
+        {
+            expect (true, "no slowdown check under the sanitizers");
+            return;
+        }
+        mph::Params worst;
+        worst.zone = 6; worst.repeats = 0.95f; worst.halo = 0.9f; worst.color = 0.2f; worst.skew = true; worst.flip = true; worst.uRateLfoDepth = 0.5f;
+        const double fresh = speedOf (48000.0, 2, worst, 10.0);
+        // an engine that has seen ten minutes of loud, then silent, then loud again material runs at the same speed (silence is where denormals bite)
+        mph::Engine e;
+        e.prepare (kSr, 512, 2);
+        std::mt19937 rng (5);
+        std::uniform_real_distribution<float> noise (-0.5f, 0.5f);
+        std::vector<float> l (512), r (512);
+        double seconds = 0.0, silentTime = 0.0, loudTime = 0.0;
+        for (int phase = 0; phase < 6; ++phase)
+        {
+            const bool silent = (phase % 2) == 1;
+            const auto t0 = std::chrono::steady_clock::now();
+            for (int block = 0; block < (int) (30.0 * kSr / 512.0); ++block)
+            {
+                for (size_t i = 0; i < l.size(); ++i) { l[i] = silent ? 0.0f : noise (rng); r[i] = silent ? 0.0f : noise (rng); }
+                float* chans[2] = { l.data(), r.data() };
+                e.setParams (worst);
+                e.process (chans, 2, 512);
+            }
+            const double t = std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count();
+            (silent ? silentTime : loudTime) += t;
+            seconds += 30.0;
+        }
+        const double speedLoud = 90.0 / std::max (loudTime, 1.0e-6), speedSilent = 90.0 / std::max (silentTime, 1.0e-6);
+        std::printf ("CPU after 3 minutes of loud / silent / loud: loud %.0fx, silent (decaying tails, denormal territory) %.0fx; fresh %.0fx\n", speedLoud, speedSilent, fresh);
+        expect (speedLoud > 0.4 * fresh, "no slowdown: the engine runs as fast after minutes of use as when fresh");
+        expect (speedSilent > 0.4 * fresh, "no slowdown: fading tails and silence do not slow the engine (denormals are under control)");
+    }
+
+    void testMilestone12Stability()
+    {
+        std::mt19937 rng (1212);
+        std::uniform_real_distribution<float> noise (-0.5f, 0.5f), unit (0.0f, 1.0f);
+        bool finite = true, bounded = true;
+        for (int run = 0; run < 40; ++run)
+        {
+            const int channels = (run % 5 == 4) ? 1 : 2;
+            mph::Engine e;
+            e.prepare (kSr, 512, channels);
+            std::vector<float> l (512), r (512);
+            for (int block = 0; block < 160; ++block)
+            {
+                mph::Params p;
+                p.hold = (rng() % 3) != 0 && block > 20;
+                p.holdFull = (rng() % 2) == 0;
+                p.flip = (rng() % 4) == 0;
+                p.halo = unit (rng); p.repeats = unit (rng); p.zone = (int) (rng() % 8); p.rate = unit (rng);
+                p.color = unit (rng); p.mix = unit (rng); p.skew = (rng() % 3) == 0; p.pingPong = (rng() % 3) == 0;
+                p.tempoSync = (rng() % 4) == 0; p.uRate = unit (rng); p.uRateLfoDepth = unit (rng); p.uRateLfoRate = unit (rng);
+                p.clear = (rng() % 40) == 0;
+                for (size_t i = 0; i < l.size(); ++i) { l[i] = noise (rng); r[i] = noise (rng); }
+                float* chans[2] = { l.data(), r.data() };
+                e.setParams (p);
+                e.process (chans, channels, 512);
+                for (size_t i = 0; i < l.size(); ++i)
+                {
+                    finite = finite && std::isfinite (l[i]) && std::isfinite (r[i]);
+                    bounded = bounded && std::fabs (l[i]) < 4.0f && std::fabs (r[i]) < 4.0f;
+                }
+            }
+        }
+        expect (finite, "Hold Range stability: 40 random runs with the switch thrown about: always finite");
+        expect (bounded, "Hold Range stability: 40 random runs: always bounded");
+    }
 }
 
 int main()
@@ -3812,6 +4316,13 @@ int main()
     testHoldRules();
     testHoldSound();
     testHoldStability();
+    testHoldRangeRules();
+    testHoldRangeSound();
+    testMilestone12Stability();
+    testSampleRates();
+    testSpeed();
+    testNoSlowdown();
+    testLongSession();
 
     std::printf ("engine tests: %d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;

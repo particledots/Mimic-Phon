@@ -16,7 +16,7 @@ namespace
     constexpr int kLeft = 24, kLabelWidth = 150, kSliderWidth = 440, kTextBoxWidth = 80;
     constexpr int kRowHeight = 40, kFirstRowY = 92;
     constexpr int kButtonX = 800, kButtonWidth = 370, kButtonHeight = 40, kButtonGap = 8;
-    constexpr int kNoteY = 470, kNoteHeight = 150;
+    constexpr int kNoteY = 500, kNoteHeight = 150;
 }
 
 MimicPhonSliderPanel::MimicPhonSliderPanel (juce::AudioProcessorValueTreeState& s)
@@ -40,7 +40,7 @@ MimicPhonSliderPanel::MimicPhonSliderPanel (juce::AudioProcessorValueTreeState& 
     addChoice (MphParams::uRateLfoShape, "uRate LFO Shape");
     addChoice (MphParams::clockDivision, "Clock Division");
 
-    // The seven buttons.
+    // The eight buttons.
     addButton (MphParams::hold,         "HOLD");
     addButton (MphParams::flip,         "FLIP");
     addButton (MphParams::skew,         "SKEW");
@@ -48,6 +48,7 @@ MimicPhonSliderPanel::MimicPhonSliderPanel (juce::AudioProcessorValueTreeState& 
     addButton (MphParams::clear,        "CLEAR");
     addButton (MphParams::tempoSync,    "TEMPO SYNC");
     addButton (MphParams::uRateLfoSync, "uRATE LFO SYNC");
+    addButton (MphParams::holdRange,    "HOLD RANGE (ON = FULL MEMORY)");
 
     // Back to the styled panel
     styledPanelButton.setTooltip ("Switch to the styled panel");
@@ -133,12 +134,13 @@ void MimicPhonSliderPanel::paint (juce::Graphics& g)
     g.drawRoundedRectangle (note.toFloat().reduced (0.5f), 6.0f, 1.0f);
     g.setColour (kAmber);
     g.setFont (font (12.0f, true));
-    g.drawText ("VERSION " JucePlugin_VersionString " - THE REPEATER WITH HOLD", note.getX() + 14, note.getY() + 10, note.getWidth() - 28, 18,
+    g.drawText ("VERSION " JucePlugin_VersionString " - COMPLETE", note.getX() + 14, note.getY() + 10, note.getWidth() - 28, 18,
                 juce::Justification::centredLeft);
     g.setColour (kText);
     g.setFont (font (14.0f));
     g.drawFittedText ("Working now: Input Level and gain step, Zone, Rate, Repeats, Mix, Output Level, Clear, Color, Skew, Ping Pong / Swap, uRate and its LFO, Tempo Sync, Halo, Flip, Hold. "
-                      "Every control works now. The styled panel shows the same controls.",
+                      "Every control works. Hold Range: off = Repeats scrubs the current Zone's memory while Hold is on, on = the whole 41.8 s memory. "
+                      "The styled panel shows the same controls.",
                       note.getX() + 14, note.getY() + 34, note.getWidth() - 28, note.getHeight() - 44,
                       juce::Justification::topLeft, 6, 1.0f);
 

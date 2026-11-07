@@ -2,7 +2,7 @@
 //
 // It does these things without needing Logic:
 //   1. draws the styled panel and the plain slider window to picture files;
-//   2. checks, in BOTH windows, that the 21 control ids are exactly the frozen list, that every control changes exactly one
+//   2. checks, in BOTH windows, that the 22 control ids are exactly the frozen list (21 + holdRange), that every control changes exactly one
 //      parameter, that every parameter has exactly one control, and that host automation moves the controls;
 //   3. checks the switch between the two windows (the PLAIN SLIDERS and STYLED PANEL buttons), that the choice is remembered in
 //      the saved project, and that a project saved before milestone 3 opens with the styled panel;
@@ -18,6 +18,8 @@
 //      is heard backwards (a click lands mirrored round the chunk start); picture styled_panel_flip.png.
 //   9. (milestone 11) checks Hold: the Delay box shows the loop length, Repeats reads "newest" / "start ...", and through the real
 //      processor the loop keeps sounding with silence or new sound at the input;
+//  10. (milestone 12) checks the Hold Range switch: the button says RANGE: ZONE / RANGE: FULL, Repeats' start point read-out is what the real
+//      processor plays (a stored ramp), in Zone and in Full.
 //
 // Usage: MimicPhonPreview <folder for the pictures>
 
@@ -117,7 +119,8 @@ namespace
     const char* const kFrozenIds[] = {
         "inputLevel", "mix", "repeats", "halo", "outputLevel", "color", "rate", "uRate", "uRateLfoRate", "uRateLfoDepth",
         "zone", "inputGain", "uRateLfoShape", "clockDivision",
-        "hold", "flip", "skew", "pingPong", "clear", "tempoSync", "uRateLfoSync"
+        "hold", "flip", "skew", "pingPong", "clear", "tempoSync", "uRateLfoSync",
+        "holdRange"          // the 22nd id, appended in 1.0.0 (the first 21 never changed)
     };
 
     // Feeds blocks of noise through the real processor and returns true if every sample came out exactly as it went in.
@@ -167,9 +170,9 @@ namespace
         std::set<juce::String> frozen;
         for (auto* id : kFrozenIds)
             frozen.insert (id);
-        expect (frozen.size() == (size_t) MphParams::kNumParameters, "the frozen list has 21 ids");
+        expect (frozen.size() == (size_t) MphParams::kNumParameters, "the frozen list has 22 ids (21 frozen in milestone 2 + holdRange appended in 1.0.0)");
         expect (allIds == frozen, "the plugin's parameter ids are exactly the frozen list");
-        expect (allIds.size() == 21, "21 parameters");
+        expect (allIds.size() == 22, "22 parameters");
 
         const auto& ids = editor.controlledParameterIds();
         std::set<juce::String> controlled (ids.begin(), ids.end());
@@ -223,7 +226,7 @@ namespace
         }
         expect (toggles == expected.toggles, which + ": " + juce::String (expected.toggles) + " on/off buttons (found " + juce::String (toggles) + ")");
 
-        expect (moved == allIds, which + ": moving the controls reached all 21 parameters");
+        expect (moved == allIds, which + ": moving the controls reached all 22 parameters");
 
         // And the other way: a parameter change shows up in the control (host automation -> window)
         if (! sliders.empty())
@@ -276,18 +279,18 @@ int main (int argc, char** argv)
     proc.prepareToPlay (48000.0, 512);
 
     expect (proc.getName() == "MimicPhon", "the plugin is called MimicPhon");
-    expect (proc.getParameters().size() == 21, "the plugin exposes 21 parameters to the host");
+    expect (proc.getParameters().size() == 22, "the plugin exposes 22 parameters to the host");
 
     // ---------------- control checks: the styled panel (the default) and the plain window ----------------
     {
         MimicPhonEditor editor (proc);
         editor.setSize (1080, 720);
         expect (editor.getView() == MimicPhonEditor::View::styled, "a new window opens with the styled panel");
-        checkControls (proc, editor, { 11, 1, 2, 7 }, "styled");
+        checkControls (proc, editor, { 11, 1, 2, 8 }, "styled");
 
         editor.showView (MimicPhonEditor::View::plain);
         expect (editor.getView() == MimicPhonEditor::View::plain, "the editor can show the plain window");
-        checkControls (proc, editor, { 10, 4, 0, 7 }, "plain");
+        checkControls (proc, editor, { 10, 4, 0, 8 }, "plain");
 
         // Control values survive a save and reload
         resetAll (proc);
@@ -1062,6 +1065,77 @@ int main (int argc, char** argv)
             expect (ignored > 0.5, "Hold: new input does not break the loop");
         }
 
+        // ---- Hold Range (milestone 12): the button, and Repeats' start point read-out equals what the real processor plays ----
+        {
+            const double slope = 5.0e-7, sr = 48000.0;
+            const double loopSeconds = mph::core::freeDelaySeconds (4, 0.5f);
+            auto parseSeconds = [] (const juce::String& t)
+            {
+                const auto number = t.fromFirstOccurrenceOf ("start ", false, false);
+                const double v = number.getDoubleValue();
+                return number.endsWith (" ms") ? v / 1000.0 : v;
+            };
+            for (int full = 0; full < 2; ++full)
+            {
+                MimicPhonProcessor q;
+                fresh (q);
+                q.setPlayConfigDetails (2, 2, sr, 480);
+                q.prepareToPlay (sr, 480);
+                juce::AudioBuffer<float> buf (2, 480);
+                juce::MidiBuffer midi;
+                long n = 0;
+                std::vector<double> grab;
+                auto feed = [&] (int blocks, bool ramp, bool keep)
+                {
+                    for (int b = 0; b < blocks; ++b)
+                    {
+                        for (int i = 0; i < 480; ++i)
+                            for (int c = 0; c < 2; ++c)
+                                buf.setSample (c, i, ramp ? (float) (slope * (double) (n + i)) : 0.0f);
+                        n += 480;
+                        q.processBlock (buf, midi);
+                        if (keep)
+                            for (int i = 0; i < 480; ++i)
+                                grab.push_back ((double) buf.getSample (0, i));
+                    }
+                };
+                feed (2400, true, false);                                    // 24 s of a rising ramp: the memory holds it
+                const double press = (double) n;
+                setParameter (q, MphParams::holdRange, (float) full);
+                setParameter (q, MphParams::repeats, 0.5f);
+                setParameter (q, MphParams::hold, 1.0f);
+                feed (150, false, false);                                    // the start point has glided to its place
+                feed (70, false, true);                                      // a little over one pass of the loop
+                const int pass = (int) std::lround (loopSeconds * sr);
+                double mean = 0.0;
+                for (int i = 0; i < pass; ++i)
+                    mean += grab[(size_t) i];
+                mean /= (double) pass;
+                const double heardStart = press / sr - (mean / slope) / sr - 0.5 * loopSeconds;
+
+                MimicPhonEditor win (q);
+                win.setSize (1200, 800);
+                if (auto* pn = win.getStyledPanel())
+                {
+                    pn->refreshNow();
+                    std::vector<KnobCard*> cards;
+                    collect (*pn, cards);
+                    juce::String shownText = "(no such card)";
+                    for (auto* c : cards)
+                        if (juce::String (c->getParameterId()) == MphParams::repeats)
+                            shownText = c->getReadoutText();
+                    const double shown = parseSeconds (shownText);
+                    std::cout << "  Hold Range " << (full ? "Full" : "Zone") << ": Repeats reads '" << shownText << "', the sound starts " << heardStart << " s back" << std::endl;
+                    expect (pn->holdRangeButtonText() == (full ? "RANGE: FULL" : "RANGE: ZONE"), full ? "Hold Range on: the button says RANGE: FULL" : "Hold Range off: the button says RANGE: ZONE");
+                    expect (shownText.startsWith ("start "), "Hold Range: Repeats reads a start point");
+                    expect (std::abs (shown - heardStart) < (full ? 0.25 : 0.05),
+                            full ? "Hold Range = Full: the start point Repeats reads (20.6 s) is where the real processor plays the loop from"
+                                 : "Hold Range = Zone: the start point Repeats reads (327 ms) is where the real processor plays the loop from");
+                    expect (full ? (shown > 20.0 && shown < 21.0) : (shown > 0.30 && shown < 0.35), "Hold Range: the start point has the expected size in this range");
+                }
+            }
+        }
+
         // ---- Tempo Sync (milestone 8): the echo heard is the time the window shows ----
         {
             // Default Zone 4, Rate 1/1, 120 BPM assumed (no playhead here): 500 ms
@@ -1135,7 +1209,7 @@ int main (int argc, char** argv)
         }
 
         // The plain window carries the same buttons and controls (nothing was added or removed)
-        expect (proc.getParameters().size() == 21, "still 21 parameters: no control id was added or removed");
+        expect (proc.getParameters().size() == 22, "still 22 parameters: the 21 old ids are untouched and holdRange was appended");
     }
 
     // ---------------- a picture with uRate and the LFO working in Zone 0 (its own plugin object) ----------------
@@ -1222,6 +1296,7 @@ int main (int argc, char** argv)
         holdEditor.showView (MimicPhonEditor::View::styled);
         holdEditor.setSize (1200, 800);
         setParameter (holdProc, MphParams::hold, 1.0f);
+        setParameter (holdProc, MphParams::holdRange, 1.0f);          // the picture shows the Range button lit (FULL)
         setParameter (holdProc, MphParams::zone, 3.0f / 7.0f);
         setParameter (holdProc, MphParams::repeats, 0.4f);
         processSeconds (holdProc, 0.3, 480);

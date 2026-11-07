@@ -1,5 +1,5 @@
-// The list of controls Logic can see and automate: every control of the whole plugin (21 in all), declared in
-// milestone 2 and FROZEN from then on.
+// The list of controls Logic can see and automate: every control of the whole plugin (22 in all: the first 21 were declared in
+// milestone 2 and are FROZEN; the 22nd, holdRange, was appended in milestone 12).
 //
 // The short ids below are what Logic stores in saved projects and automation, so they must never be renamed or removed.
 // If a later milestone ever needs one more control, it gets a new id added at the end (and old projects open with it
@@ -41,8 +41,9 @@ namespace MphParams
     inline constexpr const char* clear         = "clear";            // momentary: acts, then switches itself off
     inline constexpr const char* tempoSync     = "tempoSync";
     inline constexpr const char* uRateLfoSync  = "uRateLfoSync";
+    inline constexpr const char* holdRange     = "holdRange";        // added in 1.0.0 (the 22nd id): Hold's scrub range, off = Zone (default), on = Full memory
 
-    inline constexpr int kNumParameters = 21;
+    inline constexpr int kNumParameters = 22;
 
     juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
 }

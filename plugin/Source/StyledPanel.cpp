@@ -465,6 +465,8 @@ MimicPhonStyledPanel::MimicPhonStyledPanel (juce::AudioProcessorValueTreeState& 
 
     // ---- the button row ----
     addPanelButton (MphParams::hold,     "HOLD");
+    addPanelButton (MphParams::holdRange, "RANGE: ZONE");
+    holdRangeButton = &buttons.back()->button;   // Hold's scrub range: ZONE (the Zone's memory, default) or FULL (all 41.8 s); lit when Full
     addPanelButton (MphParams::flip,     "FLIP");
     addPanelButton (MphParams::skew,     "SKEW");
     addPanelButton (MphParams::pingPong, "PING PONG / SWAP");
@@ -543,7 +545,7 @@ juce::String MimicPhonStyledPanel::repeatsReadout (double value) const
     const auto r = getReadout();
     if (! r.holdOn)
         return repeatsText (value);
-    const double start = mph::core::holdStartSeconds ((float) value, r.zone, r.holdLoopLeft);
+    const double start = mph::core::holdStartSeconds ((float) value, r.zone, r.holdLoopLeft, r.holdFull);
     return start < 0.0005 ? juce::String ("newest") : "start " + delayText (start);
 }
 
@@ -578,6 +580,7 @@ MimicPhonStyledPanel::Readout MimicPhonStyledPanel::getReadout() const
     const bool splitSides = stereo && skewState.skewed;
     r.flipOn = get (MphParams::flip) > 0.5f;
     r.holdOn = get (MphParams::hold) > 0.5f;
+    r.holdFull = get (MphParams::holdRange) > 0.5f;
     if (r.holdOn)
     {
         // Hold: the loop is as long as the delay time (core/Hold.h); in Zone 0 uRate sets its pitch, so its length; the other Zones keep the
@@ -631,7 +634,7 @@ MimicPhonStyledPanel::Readout MimicPhonStyledPanel::getReadout() const
 juce::String MimicPhonStyledPanel::currentSignature (const Readout& r) const
 {
     return juce::String (r.zone) + "|" + r.delayLeft + "|" + r.delayRight + "|" + r.tempo + "|" + r.rateText + "|"
-           + (r.synced ? "s" : "f") + (r.pingFlashing ? "p" : "n") + (flashBright ? "b" : "d") + (r.flipOn ? "F" : "-") + (r.holdOn ? "H" : "-") + "|" + r.pingLabel
+           + (r.synced ? "s" : "f") + (r.pingFlashing ? "p" : "n") + (flashBright ? "b" : "d") + (r.flipOn ? "F" : "-") + (r.holdOn ? "H" : "-") + (r.holdFull ? "R" : "-") + "|" + r.pingLabel
            + "|" + juce::String (state.getRawParameterValue (MphParams::uRateLfoSync)->load());
 }
 
@@ -643,6 +646,14 @@ void MimicPhonStyledPanel::timerCallback()
     // The Ping Pong / Swap button says which of the two is working
     if (pingButton != nullptr && pingButton->getButtonText() != r.pingLabel)
         pingButton->setButtonText (r.pingLabel);
+
+    // The Hold Range switch says which range it has
+    if (holdRangeButton != nullptr)
+    {
+        const juce::String rangeText = r.holdFull ? "RANGE: FULL" : "RANGE: ZONE";
+        if (holdRangeButton->getButtonText() != rangeText)
+            holdRangeButton->setButtonText (rangeText);
+    }
 
     if (clearGlow > 0 && --clearGlow == 0 && clearButton != nullptr)
     {
@@ -682,10 +693,13 @@ void MimicPhonStyledPanel::timerCallback()
             rateCard->repaint();
         if (repeatsCard != nullptr)
         {
-            if (r.holdOn != lastHoldShown)
+            const int noteState = (r.holdOn ? 1 : 0) + (r.holdFull ? 2 : 0);
+            if (noteState != lastNoteState)
             {
-                lastHoldShown = r.holdOn;
-                repeatsCard->setNoteText (0, r.holdOn ? "NEWEST ... START POINT ... OLDEST" : "ONE ECHO ... INFINITE+");
+                lastNoteState = noteState;
+                repeatsCard->setNoteText (0, ! r.holdOn ? "ONE ECHO ... INFINITE+"
+                                                       : r.holdFull ? "NEWEST ... FULL MEMORY ... OLDEST"
+                                                                    : "NEWEST ... START POINT ... OLDEST");
             }
             repeatsCard->repaint();         // with Hold on its read-out depends on the Zone and Rate too
         }
@@ -818,9 +832,10 @@ void MimicPhonStyledPanel::resized()
     }
     lfoCard->setBounds (kMargin + 4 * kCardStep, kRow2Top, kCardWidth, kCardHeight);
 
-    const int xs[6] = { 48, 180, 312, 444, 656, 890 };
-    const int ws[6] = { 120, 120, 120, 200, 120, 130 };
-    for (size_t i = 0; i < buttons.size() && i < 6; ++i)
+    // Hold, its Range switch (next to it), Flip, Skew, Ping Pong / Swap, Clear, Tempo Sync
+    const int xs[7] = { 48, 170, 322, 444, 566, 768, 890 };
+    const int ws[7] = { 110, 140, 110, 110, 190, 110, 130 };
+    for (size_t i = 0; i < buttons.size() && i < 7; ++i)
         buttons[i]->button.setBounds (xs[i], kButtonTop, ws[i], kButtonHeight);
     clockBox.setBounds (1032, kButtonTop, 120, kButtonHeight);
 

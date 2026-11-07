@@ -34,6 +34,7 @@ namespace mph::dsp
             memory.assign ((size_t) length, 0.0f);
             writeCount = 0;
             clearedAt = 0;
+            ahead = 0;          // (found in milestone 12: preparing again while Hold was on kept the old virtual time and read silence)
         }
 
         int capacity() const { return length; }

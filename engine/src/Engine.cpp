@@ -282,7 +282,7 @@ void Engine::process (float* const* channels, int numChannels_, int numSamples)
     auto holdLoopClamp = [&] (double samples) { return std::min (holdCapSamples, std::max (core::kHoldMinLoopSamples, samples)); };
     auto holdStartTarget = [&] (int zone, double loopSamples)
     {
-        return core::holdStartSeconds (params.repeats, zone, loopSamples / sampleRate) * sampleRate;
+        return core::holdStartSeconds (params.repeats, zone, loopSamples / sampleRate, params.holdFull) * sampleRate;
     };
     bool holdPressJump = false, holdScrubJump = false;
     if (started && holdNow)

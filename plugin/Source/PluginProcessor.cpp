@@ -88,6 +88,7 @@ mph::Params MimicPhonProcessor::readParams() const
     p.clear        = on (MphParams::clear);
     p.tempoSync    = on (MphParams::tempoSync);
     p.uRateLfoSync = on (MphParams::uRateLfoSync);
+    p.holdFull     = on (MphParams::holdRange);
     return p;
 }
 

@@ -77,5 +77,9 @@ namespace mph
         bool clear = false;           // momentary: acts, then the wrapper switches it back off
         bool tempoSync = false;
         bool uRateLfoSync = false;
+
+        // Added in milestone 12 (the 22nd control, appended at the end): how far back Repeats scrubs while Hold is on.
+        // false = the current Zone's memory (the behaviour of 0.11.0, and the starting position); true = the whole 41.8 s memory.
+        bool holdFull = false;
     };
 }

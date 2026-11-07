@@ -68,6 +68,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
     layout.add (button (clear,        "Clear"));
     layout.add (button (tempoSync,    "Tempo Sync"));
     layout.add (button (uRateLfoSync, "uRate LFO Sync"));
+    layout.add (button (holdRange,    "Hold Range (off = Zone, on = Full)"));      // 22nd id, appended in 1.0.0
 
     return layout;
 }

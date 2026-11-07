@@ -178,6 +178,7 @@ public:
         bool skewed = false;                    // the two sides are noticeably different
         bool flipOn = false;                    // Flip is on: the delay box shows the length of the reversed chunk (header "DELAY FLIP")
         bool holdOn = false;                    // Hold is on: the delay box shows the length of the loop (header "DELAY HOLD") and Repeats reads the start point
+        bool holdFull = false;                  // Hold Range switch on "Full": with Hold on, Repeats scrubs the whole 41.8 s memory instead of the Zone's
         double holdLoopLeft = 0.0;              // seconds: the loop the left side plays (the start point's read-out is worked out from it)
         juce::String pingLabel;                 // the Ping Pong / Swap button's label: "PING PONG / SWAP" (off), "PING PONG" or "SWAP"
     };
@@ -188,6 +189,7 @@ public:
     bool tickLightOn() const { return tickPulse > 0; }
     bool rateLightOn() const { return ratePulse > 0; }
     juce::String pingButtonText() const { return pingButton != nullptr ? pingButton->getButtonText() : juce::String(); }   // "PING PONG / SWAP", "PING PONG" or "SWAP"
+    juce::String holdRangeButtonText() const { return holdRangeButton != nullptr ? holdRangeButton->getButtonText() : juce::String(); }   // "RANGE: ZONE" or "RANGE: FULL"
     bool zoneWindowBright() const { return flashBright; }       // false for half a second at a time while Ping Pong / Swap is on
 
     // Runs the timer's work once (the preview tool calls this instead of waiting).
@@ -216,7 +218,7 @@ private:
     std::vector<std::unique_ptr<KnobCard>> cards;
     KnobCard* rateCard = nullptr;
     KnobCard* repeatsCard = nullptr;
-    bool lastHoldShown = false;
+    int lastNoteState = 0;                 // Repeats card note: bit 0 = Hold on, bit 1 = Hold Range on Full
     std::unique_ptr<ChipSelector> gainChips;
     KnobCard* uRateCard = nullptr;
     std::unique_ptr<LfoCard> lfoCard;
@@ -226,6 +228,7 @@ private:
     juce::TextButton plainSliders { "PLAIN SLIDERS" };
     juce::TextButton* clearButton = nullptr;
     juce::TextButton* pingButton = nullptr;
+    juce::TextButton* holdRangeButton = nullptr;   // "RANGE: ZONE" / "RANGE: FULL" (lit when Full)
     int clearGlow = 0;
 
     // What was last drawn in the Zone band (so it is redrawn only when something changed).

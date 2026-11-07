@@ -56,10 +56,12 @@ namespace mph::core
 
     // Where the loop starts, in seconds back from the moment Hold was pressed, for a Repeats knob position: 0 = the newest stretch, fully
     // right = as far back as the current Zone reaches (the Zone's longest time), minus the loop itself.
-    inline double holdStartSeconds (float repeatsKnob, int zone, double loopSeconds)
+    // Milestone 12: with "full" (the Hold Range switch on "Full") the scrub reaches as far back as the longest Zone does (the whole memory,
+    // 41.8 s minus the loop), whatever the Zone is. With full = false it is exactly what it was in 0.11.0.
+    inline double holdStartSeconds (float repeatsKnob, int zone, double loopSeconds, bool full = false)
     {
         const double k = std::min (1.0, std::max (0.0, (double) repeatsKnob));
-        const int z = std::min (kNumZones - 1, std::max (0, zone));
+        const int z = full ? kNumZones - 1 : std::min (kNumZones - 1, std::max (0, zone));
         const double room = std::min (kZones[z].maxSeconds, kHoldMaxLoopSeconds) - loopSeconds;
         return room > 0.0 ? k * room : 0.0;
     }
